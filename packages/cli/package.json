@@ -1,0 +1,24 @@
+{
+  "name": "@haril-ts/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "haril": "./dist/cli.js" },
+  "scripts": {
+    "build": "bun build src/cli.ts --outfile dist/cli.js --target node --format esm --banner '#!/usr/bin/env node'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@haril-ts/core": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ink": "^7.1.1",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

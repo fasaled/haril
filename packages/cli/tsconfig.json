@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "@haril-ts/core": ["../core/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*"]
+}

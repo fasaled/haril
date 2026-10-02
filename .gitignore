@@ -1,0 +1,14 @@
+node_modules/
+bun.lock
+dist/
+*.log
+.DS_Store
+native/out/
+native/zig-cache/
+native/node.lib
+native/node-arm64.lib
+*.dll
+*.exe
+*.obj
+*.pdb
+*.ilk
