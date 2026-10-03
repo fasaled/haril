@@ -69,8 +69,7 @@ describe("decodeSlot", () => {
     const d = decodeSlot(
       makeSlot({
         source: 2,
-        usn: { frn: 0x1234n, parent: 0x5n, usn: 0x999n, reason: 0x100,
-        },
+        usn: { frn: 0x1234n, parent: 0x5n, usn: 0x999n, reason: 0x100 },
       }),
     );
     expect(d.usn).toEqual({
