@@ -1,34 +1,29 @@
 # Haril-TS
 
-File-lifecycle reconstruction for Windows NTFS, in **Bun + TypeScript**.
-Reimplemented, faithful to the idea (not the code), of [Haril](https://github.com/fasaled/haril).
-UX and architecture inspired by [`muin`](https://github.com/fasaled/muin)
-and [`sailkari`](https://github.com/fasaled/sailkari).
+File-lifecycle reconstruction for NTFS Windows, in **Bun + TypeScript**.
 
 ## What it does
 
 - Records factual file activity under a chosen directory tree on NTFS,
-  during a 1–300 s capture window.
+  during a 1–300 second capture window.
 - Combines three sources:
   - **Windows Kernel ETW** (`Microsoft-Windows-Kernel-File`,
     `Microsoft-Windows-Kernel-Process`,
-    `Microsoft-Windows-Kernel-Image`) via
-    `TdhGetEventInformation`.
+    `Microsoft-Windows-Kernel-Image`) via the native addon.
   - **NTFS USN Journal** via `FSCTL_READ_USN_JOURNAL`.
   - **FileSystemWatcher** (user-mode path notifications).
 - Produces a portable `.haril` archive (ZIP + JSONL streams + SHA-256
-  manifest).
-- Opens the archive in the same TUI for analysis: parallel file lanes
-  on a shared UTC axis, source-fidelity evidence, file-centric only,
-  no inferred causality.
-- Exposes the same `FileTimelineCommands` query core to an MCP stdio
-  server.
+  manifest). The same archive can be opened in another machine for
+  analysis. The same `FileTimelineCommands` query service powers both
+  the TUI (Ink + React) and an MCP stdio server.
 
 ## Constraints
 
 - **Bun runtime only**. The published executable is built with
   `bun build --compile` and contains the Bun runtime + the JS bundle.
-- **Windows only** (`os: ["win32"]`). Capture refuses non-NTFS volumes.
+- **Windows only for capture** (`os: ["win32"]`). The native addon
+  (`haril_native.node`) provides ETW + USN journal + FSW callbacks
+  exclusively on Windows. Capture refuses non-NTFS volumes.
 - **Elevation required** to start capture (NT Kernel Logger).
   Auto-relaunched via `ShellExecuteExW(Verb="runas")` when not
   elevated; preservable session state written to
@@ -38,22 +33,38 @@ and [`sailkari`](https://github.com/fasaled/sailkari).
 - The package is the durable source of truth; the live SQLite index
   is rebuilt from the package when analysis starts.
 
+- **Non-Windows** (macOS, Linux): the native addon is not built.
+  The TUI/MCP can still open and analyze existing `.haril` packages,
+  but `start-capture` is not available. The project degrades gracefully
+  to analysis-only on these platforms.
+
 ## Native addon
 
-Capture uses `haril_native.node`, a Node-API addon built from C++ with
-MSBuild + MSVC. See [`docs/native.md`](docs/native.md) for the linker
-targets and build steps.
+Capture uses `haril_native.node`, a Node-API addon built from C++
+with MSBuild + MSVC. See [`docs/native.md`](docs/native.md) for the
+linker targets and build steps.
 
-The addon is **optional at runtime**: without it the TUI/MCP can still
-open existing `.haril` packages and run analysis, but capture falls
-back to a TS-only path (FSW + `stat` inventories, no ETW/USN).
+The addon is **required on Windows** for capture functionality
+(ETW + USN journal + FSW callbacks). Without it, the TUI
+`start-capture` command returns an error and no live capture is
+possible. However, opening and analyzing existing `.haril` packages
+still works — the TUI enters analyze phase with a summary indicating
+the addon is missing.
+
+On non-Windows hosts (macOS, Linux), the native addon is not built
+and the project degrades fully: no capture (those OSes don't have
+NTFS/ETW/USN in the same way), but `.haril` analysis packages opened
+from Windows can be inspected, searched, and summarized.
+
+This keeps the project cross-platform for analysis-only use cases
+while ensuring Windows capture always requires the native addin.
 
 ## Requirements
 
 - Bun 1.3+ (already inside the compiled executable).
 - For development: Bun 1.3+, Visual Studio 2022 Build Tools with the
   C++ workload (to build `haril_native.node`).
-- Windows 11 with an NTFS volume.
+- Windows 11 with an NTFS volume (for capture).
 
 ## Run
 
