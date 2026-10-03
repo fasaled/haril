@@ -1,145 +1,109 @@
-# haril_native — native DLL build
+# haril_native — Node-API addon build
 
-Haril-TS captures kernel ETW events, USN journal records, and per-file
-identities through a small native DLL: `haril_native.dll`. The
-TypeScript side loads it via `bun:ffi`.
+Haril-TS captures kernel ETW events, USN journal records, and per-file identities through a Node-API addon: `haril_native.node`. The TypeScript side loads it via `require()`.
 
-## Why a DLL
+## Why a Node-API addon
 
-`bun:ffi` can call C functions exported by a DLL. Bun itself runs the
-JS code, but the kernel-level APIs (`StartTraceW`,
-`TdhGetEventInformation`, `FSCTL_READ_USN_JOURNAL`,
-`GetFileInformationByHandleEx`, `ShellExecuteExW` with `runas`) are
-Windows-only and are not exposed by `bun:ffi` itself.
+`bun:ffi.dlopen()` is disabled in Bun 1.3.14 (TinyCC disabled), so a DLL loaded via `dlopen` cannot be used from JS in the current environment. A Node-API addon (`*.node`) loaded with plain `require()` works because the N-API surface is resolved dynamically at runtime via `GetProcAddress/GetModuleHandle(NULL)` — no `node.lib` link dependency at load time.
 
-## Toolchain
+The addon is **required on Windows** for capture functionality (ETW + USN journal + FSW callbacks). Without it, the TUI `start-capture` command returns an error and no live capture is possible. However, opening and analyzing existing `.haril` packages still works — the TUI enters analyze phase with a summary indicating the addon is missing.
 
-We use **MSBuild** with the **Visual Studio 2022 C++ Build Tools**
-(`MSBuild.exe` + `cl.exe` + `link.exe`) targeting **MSVC v143** and
-the **Windows 10/11 SDK** (10.0.26100.0 in this build).
+On non-Windows hosts (macOS, Linux), the native addon is not built and the project degrades fully: no capture (those OSes don't have NTFS/ETW/USN in the same way), but `.haril` analysis packages opened from Windows can be inspected, searched, and summarized.
 
-`native/build-windows.ps1` wraps the call:
+This keeps the project cross-platform for analysis-only use cases while ensuring Windows capture always requires the native addin.
+
+### ARM64 support
+
+The build script supports both architectures:
 
 ```powershell
 bun run build:native            # x64 Release (default)
-bun run build:native:arm64      # not yet supported (TODO)
+bun run build:native:arm64      # arm64 Release
 ```
 
-The output is `native/out/bin/haril_native.dll` (`bin-arm64` for arm64).
+The output mirrors by architecture:
+- `haril_native.node` (x64, default)
+- `haril_native.node` (arm64, after `build:native:arm64`)
 
-The C++ source is C++20 with selected C++23 features (`std::jthread`,
-`std::stop_token` semantics, `std::span`). MSBuild targets
-`<LanguageStandard>stdcpplatest</LanguageStandard>`.
+On ARM64 Windows hosts, you must build/select the arm64 `.node` file. An x64 `.node` cannot load into an arm64 process (`LoadLibrary` fails with `%1 is not a valid Win32 application`). Conversely, on x64 Windows the x64 `.node` is required.
+
+The current build output contains the x64 build. To build for arm64, run `bun run build:native:arm64` on an arm64 host or via cross-compilation setup.
+
+## Toolchain
+
+We use **MSBuild** with **Visual Studio 2022 C++ Build Tools** (`MSBuild.exe` + `cl.exe` + `link.exe`) targeting **MSVC v143** and the **Windows 10/11 SDK** (10.0.26100.0 in this build).
+
+`build-windows.ps1` wraps the call:
+
+```powershell
+bun run build:native            # x64 Release (default)
+bun run build:native:arm64      # arm64 Release
+```
+
+The output is `haril_native.node` (`bin-arm64` for arm64).
+
+The C++ source is C++20 with selected C++23 features (`std::jthread`, `std::span`). MSBuild targets `<LanguageStandard>stdcpplatest</LanguageStandard>`.
 
 ### Why MSVC, not Zig
 
-Zig 0.16 (aarch64) installed on Windows-arm64 hosts crashes with
-ACCESS_VIOLATION (`0xC0000005`) when cross-compiling real C++ for
-`x86_64-windows-msvc`. MSVC's bundled cl.exe + link.exe produce a
-valid DLL without that crash.
+Zig 0.16 (aarch64) installed on Windows-arm64 hosts crashes with ACCESS_VIOLATION (`0xC0000005`) when cross-compiling real C++ for `x86_64-windows-msvc`. MSVC's bundled cl.exe + link.exe produce a valid DLL without that crash.
 
-### Why MSVC, not MSBuild from PowerShell
+### Why Node-API addon, not `bun:ffi` / DLL
 
-`msbuild.exe` is the only MSBuild entry point available in Visual
-Studio 2022 Build Tools. Calling it with a `.vcxproj` directly is the
-simplest route and avoids the `.sln` overhead.
+`bun:ffi.dlopen()` is disabled in Bun 1.3.14 (TinyCC disabled), so a DLL loaded via `dlopen` cannot be used from JS in the current environment. A direct `LoadLibraryW` smoke test of the DLL succeeds, proving the native code itself is sound. But the FFI path is blocked by the Bun version's TinyCC restriction.
 
-### System libraries we link against
-
-| Library | Provides |
-|---|---|
-| `advapi32` | `StartTraceW`, `EnableTraceEx2`, `ControlTraceW`, `OpenTraceW`, `ProcessTrace`, `CloseTrace` |
-| `tdh`      | `TdhGetEventInformation`, `TdhFormatProperty` |
-| `kernel32` | `CreateFileW`, `FindFirstFileW`, `GetFileInformationByHandleEx(FileIdInfo)`, `DeviceIoControl(FSCTL_READ_USN_JOURNAL)`, `GetVolumeInformationW`, `QueryPerformanceCounter` |
-| `shell32`  | `ShellExecuteExW` |
-| `ole32`    | `CoInitializeEx`, `CoUninitialize` (required before `ShellExecuteExW`) |
-| `user32`   | reserved |
-
-Note: `sechost.lib` is **not** listed. Although some Microsoft docs
-say `ProcessTrace` lives there on Win 8.1+, the import library for
-`Sechost` is not bundled in the current SDK; linking succeeds via
-`Advapi32`.
+**Decision:** Ship the native core as a Node-API addon (`haril_native.node`, `NAPI_MODULE_INIT`) and load it with plain `require()`. `packages/core/src/ffi/bindings.ts` resolves the file platform-aware (`bin` for x64, `bin-arm64` for arm64) and returns `null` when it cannot load, preserving analyze-only degradation. `node.lib` (per arch, from `nodejs.org/dist`) is linked at build time; it is downloaded by `build-windows.ps1` and gitignored.
 
 ## C++ style guide (modern, RAII-first)
 
-- **No raw `new`/`delete`** in the C++ body. The DLL uses a class
-  `HarilContext` constructed with `new` only at the C-export
-  boundary (`haril_open` / `haril_close`); everything else is
-  `std::unique_ptr`, `std::jthread`, `std::span`, `std::string_view`.
-- **No leaked handles**: `UniqueHandle = std::unique_ptr<void, HandleDeleter>`
-  for every `HANDLE`. `CloseHandle` runs in the deleter.
-- **`RingBuffer`** owns its `VirtualAlloc`-backed memory; the destructor
-  calls `VirtualFree`.
-- **RAII for ETW/USN threads** via `std::jthread`: on
-  `HarilContext` destruction we explicitly request stop and join. On
-  any other path (errors, exception), the `std::jthread` joins in
-  its own destructor.
-- **`std::atomic<bool>` flags** for stop signalling from the producer
-  to the ETW consumer thread (more reliable than `stop_token` here
-  because we don't pass `stop_token` through `std::jthread`
-  constructors in this MSVC version).
+- **No raw `new`/`delete`** in the C++ body. The addon uses a class constructed only at the C-export boundary (`napi_addon.cpp`); everything else is `std::unique_ptr`, `std::jthread`, `std::span`, `std::string_view`.
+- **No leaked handles**: `UniqueHandle = std::unique_ptr<void, HandleDeleter>` for every `HANDLE`. `CloseHandle` runs in the deleter.
+- **`RingBuffer`** owns its `VirtualAlloc`-backed memory; the destructor calls `VirtualFree`.
+- **RAII for ETW/USN threads** via `std::jthread`: on `HarilContext` destruction we explicitly request stop and join. On any other path (errors, exception), the `std::jthread` joins in its own destructor.
+- **`std::atomic<bool>` flags** for stop signalling from the producer to the ETW consumer thread (more reliable than `stop_token` here because we don't pass `stop_token` through `std::jthread` constructors in this MSVC version).
 
 ## Layout
 
 ```
-native/
+haril_native/
 ├── haril_native.vcxproj       MSBuild project
 ├── build-windows.ps1           invokes MSBuild + vswhere
-├── include/haril_native.h      public C API
-├── src/main.cpp                 DllMain + all exports in one TU
-└── out/bin/haril_native.dll       (build output; mirrored as .node)
+├── include/haril_native.h      public C API (opaque Pimpl)
+├── src/main.cpp                 DllMain + napi_addon.cpp with 18 exports
+├── src/core.cpp                 HarilContext::Impl, ETW/USN/inventory/elevation
+├── src/napi_addon.cpp           18 exports N-API, atomic_counter_js wrappers
+└── out/bin/haril_native.node       (build output; mirrored as .dll for smoke tests)
 ```
 
-## Public C API
+## Public C API (opaque Pimpl)
 
-```c
-typedef struct HarilContext HarilContext;
+The addon exports 18 N-API functions wrapped in `napi_addon.cpp`. The public header `haril_native.h` declares them as `napi_callback_value` patterns; the actual C++ implementations live in `core.cpp`. Key exports:
 
-typedef enum {
-    HARIL_SOURCE_ETW = 1,
-    HARIL_SOURCE_USN = 2,
-    HARIL_SOURCE_FSW = 3,
-} HarilSource;
+| Export | Description |
+|---|---|
+| `haril_open()` | Creates `HarilContext` with RAII handles, starts nothing |
+| `haril_close()` | Destroys `HarilContext`, joins threads, frees memory |
+| `haril_source_status()` | Return bitmask: ETW/USN/FSW available |
+| `haril_etw_start()` | ETW session: canonical `NT Kernel Logger`, attach or start |
+| `haril_etw_stop()` | Request stop to ETW consumer thread |
+| `haril_etw_events_observed()` | Return observed event count |
+| `haril_etw_buffers_written()` | Return buffers written count |
+| `haril_etw_events_lost()` | Return lost event count |
+| `haril_etw_candidates_out_of_scope()` | Return out-of-root events |
+| `haril_usn_start()` | USN journal thread: `FSCTL_READ_USN_JOURNAL` |
+| `haril_usn_stop()` | Request stop to USN thread |
+| `haril_usn_records_read()` | Return total records read |
+| `haril_inventory_walk()` | Walk directory tree, emit `FILE_ID_INFO` |
+| `haril_get_file_id()` | Extract volume serial + FILE_ID_INFO from path |
+| `haril_is_admin()` | Check if running elevated (`CheckTokenMembership`) |
+| `haril_relaunch_elevated()` | `ShellExecuteExW(Verb="runas")` with COM init |
+| `haril_drain()` | Drain ring buffer slot into buffer (256 bytes each) |
 
-HarilContext* haril_open(void);
-void          haril_close(HarilContext*);
+Strings are UTF-16LE with explicit length because N-API does not auto-convert UTF-8 to UTF-16LE; the `napi_addon.cpp` wrapper converts JS strings on the way in.
 
-int32_t  haril_source_status(HarilContext*, HarilSource);
-int32_t  haril_etw_start(HarilContext*, const uint16_t* session_utf16, int32_t session_len,
-                         const uint16_t* root_utf16, int32_t root_len);
-int32_t  haril_etw_stop(HarilContext*);
-uint64_t haril_etw_events_lost(HarilContext*);
-uint64_t haril_etw_buffers_written(HarilContext*);
-uint64_t haril_etw_events_observed(HarilContext*);
-uint64_t haril_etw_candidates_out_of_scope(HarilContext*);
+## Slot layout (256 bytes, little-endian)
 
-int32_t  haril_usn_start(HarilContext*, const uint16_t* volume_utf16, int32_t volume_len);
-int32_t  haril_usn_stop(HarilContext*);
-uint64_t haril_usn_records_read(HarilContext*);
-
-int32_t  haril_inventory_walk(HarilContext*, const uint16_t* root_utf16, int32_t root_len,
-                             int is_initial,
-                             int (*emit_cb)(const uint8_t* record, int32_t record_len, void* user),
-                             void* user);
-int32_t  haril_get_file_id(const uint16_t* path_utf16, int32_t path_len,
-                           uint8_t* out_id16, uint32_t* out_volume_serial);
-
-int32_t  haril_is_admin(void);
-int32_t  haril_relaunch_elevated(const uint16_t* exe_utf16, int32_t exe_len,
-                                  const uint16_t* args_utf16, int32_t args_len);
-
-#define HARIL_SLOT_SIZE 256
-int32_t  haril_drain(HarilContext*, uint8_t* out_buf, int32_t max_slots, uint64_t* out_seq_high);
-```
-
-Strings are UTF-16LE with explicit length because neither `bun:ffi`
-nor Node-API auto-converts UTF-8 to UTF-16LE; the N-API wrapper
-(`napi_addon.cpp`) converts JS strings on the way in.
-
-## Slot layout
-
-Each ring buffer slot is 256 bytes, little-endian. Identical to the
-on-disk `.haril` event representation:
+Each ring buffer slot is 256 bytes, little-endian. Identical to the on-disk `.haril` event representation:
 
 | Offset | Size | Field |
 |---|---|---|
@@ -169,54 +133,50 @@ on-disk `.haril` event representation:
 
 ## ETW session naming
 
-The NT Kernel Logger only accepts its canonical session name
-(`NT Kernel Logger`); a custom name makes `StartTraceW` fail with
-`ERROR_INVALID_PARAMETER` (87). `etw_start` therefore always starts
-(or attaches to) the canonical session regardless of the name passed
-in. If another tool already owns the session (`ERROR_ALREADY_EXISTS`),
-we attach as a consumer and never stop a session we did not start
-(`etwOwnsSession` flag).
+The NT Kernel Logger only accepts its canonical session name (`NT Kernel Logger`); a custom name makes `StartTraceW` fail with `ERROR_INVALID_PARAMETER` (87). `etw_start` therefore always starts (or attaches to) the canonical session regardless of the name passed in. If another tool already owns the session (`ERROR_ALREADY_EXISTS`), we attach as a consumer and never stop a session we did not start (`etwOwnsSession` flag).
 
-## ETW path filter
+## USN journal identity in slot [176..204]
 
-`EtwEventCallback` compares the observed path against `etwTargetRoot`
-case-insensitively after normalising forward slashes. Events outside
-the root increment `etwOutOfScope` and are dropped.
-
-## Schema decoding (TDH)
-
-`TdhGetEventInformation` is invoked once per
-`(ProviderGuid, EventDescriptor.Id, EventDescriptor.Version)` tuple,
-on the ETW consumer thread, inside the `EventRecordCallback`. The
-returned schema is cached for the lifetime of the `HarilContext`.
-
-Per-property extraction goes through `TdhFormatProperty`, which returns
-a UTF-16LE-formatted string from any property given its `InType`,
-`OutType`, and the event blob. This is the recommended TDH path for
-non-WPP events and avoids manual MOF parsing.
-
-The legacy `FileIo/Name` event id 0 keeps a fixed-offset fallback (no
-embedded schema) so the path is still recovered.
+The 256-byte slot has 80 reserved bytes. USN records need identity FRN that ETW slots do not carry. The USN producer writes `fileReferenceNumber`, `parentFileReferenceNumber`, `usn` (u64 each) and `reason` (u32) at slot offsets `[176..204]`. The TS decoder exposes them as `DecodedSlot.usn`.
 
 ## UAC scenario (confirmed end-to-end)
 
 After build, the following is verified:
-
-- `LoadLibraryW(L"haril_native.dll")` succeeds.
+- `LoadLibraryW(L"haril_native.dll")` / `LoadLibraryW(L"haril_native.node")` succeeds.
 - `GetProcAddress(lib, "haril_open")` returns a valid function pointer.
 - `haril_open()` returns a non-null handle.
 - `haril_is_admin()` returns 0 (not elevated) or 1 (elevated).
 - `haril_close(handle)` does not crash.
+- `haril_relaunch_elevated()` elevates a new console window with `runas`.
 
-## Graceful degradation in Bun
+## Graceful degradation
 
-If `bun:ffi.dlopen()` is unavailable in the running Bun build (e.g.
-`TinyCC is disabled`), `bindings.ts` returns `null` and the runtime
-degrades to "analyze only": opening `.haril` packages works; starting
-capture returns a corrective error. See DEC-021 in `decisions.md`.
+If the addon cannot be loaded (TinyCC disabled, wrong architecture, missing `node.lib` at link time), `bindings.ts` returns `null` and the runtime degrades to "analyze only": opening `.haril` packages works; starting capture returns a corrective error.
 
-This is the situation on this build host (Bun 1.3.14 with TinyCC
-disabled). The DLL itself is verified working through a direct
-`LoadLibraryW` smoke test. On a Bun build with TinyCC enabled, the
-DLL loads via `bun:ffi.dlopen` and the full capture path becomes
-exercisable from the TUI.
+This is the situation on this build host (Bun 1.3.14 with TinyCC disabled). The DLL itself is verified working through a direct `LoadLibraryW` smoke test. On a Bun build with TinyCC enabled, the addon loads via `require()` and the full capture path becomes exercisable from the TUI.
+
+## Building the addon
+
+```bash
+bun install           # workspace install
+bun run build:native  # x64 Release (default) or arm64
+bun test              # unit + integration tests
+bun run typecheck     # tsc --noEmit
+```
+
+The build script `build-windows.ps1` resolves `MSBuild.exe` via `vswhere.exe`, invokes `haril_native.vcxproj` targeting `x64` / `Release` / `stdcpplatest`, and outputs `haril_native.node`. `node.lib` is downloaded from `nodejs.org/dist` if not present; it is gitignored.
+
+## Verifying the addon
+
+```bash
+# Load and smoke-test from JS
+node -e "const m = require('./haril_native.node'); console.log(Object.keys(m).length, 'exports loaded')"
+
+# From Bun
+bun -e "const m = require('./haril_native.node'); console.log(Object.keys(m).length, 'exports loaded')"
+```
+
+On ARM64 hosts, the x64 `.node` cannot load into an arm64 process: validate with an x64 runtime process.
+
+---
+*This documentation is self-contained. No prior knowledge of other projects is required.*
