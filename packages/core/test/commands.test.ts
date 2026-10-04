@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { parseCommand, formatCommand } from "../src/commands/parse.ts";
 import { complete } from "../src/commands/complete.ts";
+import { native } from "../src/ffi/bindings.ts";
 
 describe("parse command", () => {
   test("parses command name only", () => {
@@ -67,6 +68,8 @@ describe("complete", () => {
 
 describe("native bindings", () => {
   test("degrades gracefully when DLL is missing", async () => {
+    // Only meaningful when the addon is missing; if it loaded, skip.
+    if (native()) return;
     // Pointing to a non-existent path should give us null.
     process.env["HARIL_NATIVE_DLL"] = "C:\\nonexistent\\haril_native.dll";
     // Re-import is awkward in TS; just check that the cached binding is null

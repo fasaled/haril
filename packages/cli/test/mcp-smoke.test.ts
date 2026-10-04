@@ -28,10 +28,9 @@ if (IS_NATIVE_AVAILABLE) {
       );
 
       const out: string[] = [];
-      proc.stdout!.on("data", (chunk) => out.push(chunk.toString()));
-      proc.stderr!.on("data", () => {});
+      const errOut: string[] = [];
 
-      let timeout: Timer | null = null;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
       const cleanup = () => {
         if (timeout) clearTimeout(timeout);
         try { proc.kill(); } catch {}
@@ -49,27 +48,42 @@ if (IS_NATIVE_AVAILABLE) {
         { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_session_activity_overview", arguments: {} } },
       ];
 
-      timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error(`mcp server did not respond in 15s. stdout so far: ${out.join("")}`));
-      }, 15_000);
-
-      let i = 0;
-      function nextReq() {
-        if (i >= allRequests.length) {
-          setTimeout(() => {
+      await new Promise<void>((resolve, reject) => {
+        function checkDone() {
+          const lines = out.join("").split("\n").filter((l) => l.trim());
+          const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+          // Expect responses for id 1, 2, 3
+          if (parsed.some((p: any) => p.id === 3)) {
             cleanup();
-            const lines = out.join("").split("\n").filter((l) => l.trim());
-            const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-            resolve(parsed);
-          }, 500);
-          return;
+            resolve();
+          }
         }
-        proc.stdin!.write(JSON.stringify(allRequests[i]) + "\n");
-        i++;
-        setTimeout(nextReq, 50);
-      }
-      nextReq();
+
+        proc.stdout!.on("data", (chunk) => {
+          out.push(chunk.toString());
+          checkDone();
+        });
+        proc.stderr!.on("data", (chunk) => {
+          errOut.push(chunk.toString());
+        });
+
+        timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error(`mcp server did not respond in 15s. stdout: ${out.join("")} stderr: ${errOut.join("")}`));
+        }, 15_000);
+
+        let i = 0;
+        function sendNext() {
+          if (i >= allRequests.length) {
+            return;
+          }
+          proc.stdin!.write(JSON.stringify(allRequests[i]) + "\n");
+          i++;
+          setTimeout(sendNext, 150);
+        }
+        // Give process a moment to initialize before pumping requests
+        setTimeout(sendNext, 300);
+      });
     });
   });
 } else {

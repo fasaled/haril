@@ -45,7 +45,7 @@ struct InventoryRow {
     bool          hasFileId = false;
 };
 
-class HarilContext {
+struct HarilContext {
 public:
     HarilContext();
     ~HarilContext();

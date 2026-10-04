@@ -1,14 +1,49 @@
+# Dependencies
 node_modules/
 bun.lock
+
+# Build outputs
 dist/
-*.log
-.DS_Store
+build/
+out/
 native/out/
-native/zig-cache/
-native/node.lib
-native/node-arm64.lib
+
+# MSVC / C++ intermediate and output files
+obj/
+native/obj/
+*.obj
 *.dll
 *.exe
-*.obj
 *.pdb
 *.ilk
+*.exp
+*.lib
+*.idb
+*.ipdb
+*.iobj
+*.recipe
+*.tlog
+*.lastbuildstate
+
+# Visual Studio & VS Code
+.vs/
+*.user
+*.suo
+*.sln.docstates
+.vscode/
+.idea/
+
+# Compiler caches & temporary files
+native/zig-cache/
+.zig-cache/
+*.tsbuildinfo
+
+# Logs & temp
+*.log
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
