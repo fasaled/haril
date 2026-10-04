@@ -1,6 +1,6 @@
 # Haril
 
-File-lifecycle reconstruction for NTFS Windows, in **Bun + TypeScript**.
+File-lifecycle reconstruction for NTFS Windows, in **TypeScript + Node-API**.
 
 ## What it does
 
@@ -19,8 +19,9 @@ File-lifecycle reconstruction for NTFS Windows, in **Bun + TypeScript**.
 
 ## Constraints
 
-- **Bun runtime only**. The published executable is built with
-  `bun build --compile` and contains the Bun runtime + the JS bundle.
+- **Node.js and Bun**. The npm package supports Node.js 22.5+ through
+  `node:sqlite` and Bun 1.3.x through `bun:sqlite`. The standalone executable
+  contains the Bun runtime and needs neither runtime installed.
 - **Windows only for capture** (`os: ["win32"]`). The native addon
   (`haril_native.node`) provides ETW + USN journal + FSW callbacks
   exclusively on Windows. Capture refuses non-NTFS volumes.
@@ -68,8 +69,8 @@ while ensuring Windows capture always requires the native addin.
 
 ## Requirements
 
-- Bun 1.3.x (the reference development version is pinned in `.bun-version`
-  and `packageManager`; it is already inside the compiled executable).
+- npm package: Node.js 22.5+ or Bun 1.3.x.
+- Standalone executable: no separate JavaScript runtime.
 - For development: Bun 1.3.x, Visual Studio 2022 Build Tools with the
   C++ workload (to build `haril_native.node`).
 - Windows 11 with an NTFS volume (for capture).
@@ -94,7 +95,8 @@ bun run build              # builds both native architectures and dist/haril.exe
 
 ### Using the standalone executable
 
-The compiled standalone executable contains everything and needs no Bun installation:
+The compiled standalone executable contains everything and needs no Node.js or
+Bun installation:
 
 ```powershell
 haril.exe --version

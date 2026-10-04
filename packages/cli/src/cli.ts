@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * CLI entry point: routes between TUI, MCP server, and shell completion.
  *
@@ -22,7 +22,7 @@ import { createSession } from "../../core/src/index.ts";
 import { resumePendingSession } from "./resume.ts";
 import { getExtractedNativeDir, native } from "../../core/src/ffi/bindings.ts";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -111,8 +111,11 @@ async function runMcp(args: string[]): Promise<void> {
 
 function runDoctor(): void {
   const addon = native();
+  const runtime = process.versions.bun
+    ? `Bun ${process.versions.bun}`
+    : `Node.js ${process.version}`;
   console.log(`Haril ${VERSION}`);
-  console.log(`Runtime: Bun ${Bun.version}`);
+  console.log(`Runtime: ${runtime}`);
   console.log(`Platform: ${process.platform} ${process.arch}`);
   console.log(`Native capture: ${addon ? `available (${addon.version})` : "unavailable"}`);
   console.log(`Native directory: ${getExtractedNativeDir()}`);

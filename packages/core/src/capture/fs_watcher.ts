@@ -10,6 +10,7 @@
  */
 
 import { watch, type FSWatcher } from "node:fs";
+import { stat } from "node:fs/promises";
 import type { PathNotification } from "../model/types.ts";
 
 export interface FsWatcherOptions {
@@ -78,7 +79,7 @@ export class FsWatcher {
   private async disambiguate(path: string, at_ns: bigint): Promise<void> {
     // Defer to the next tick to give the filesystem a chance to settle.
     await new Promise((r) => setTimeout(r, 10));
-    const exists = await Bun.file(path).exists().catch(() => false);
+    const exists = await stat(path).then(() => true).catch(() => false);
     if (exists) {
       this.opts.onNotification({
         timestamp_ns: at_ns,

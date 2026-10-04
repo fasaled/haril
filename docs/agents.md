@@ -13,7 +13,9 @@ This project has three logical layers:
 ## Architecture
 
 - One source of truth: `HarilSession.run(line)` in `packages/core/src/session.ts`. The TUI and MCP both call into it.
-- All persistence (live and analysis indexes) is `bun:sqlite`. Schema in `packages/core/src/store/schema.ts`.
+- Persistence uses the runtime adapter in
+  `packages/core/src/store/runtime-sqlite.ts`: `bun:sqlite` under Bun and
+  `node:sqlite` under Node.js. Schema lives in `packages/core/src/store/schema.ts`.
 - The `.haril` package is a ZIP (`STORE`) with SHA-256-protected entries; writer/reader in `packages/core/src/package/`.
 - Native capture goes through `packages/core/src/ffi/bindings.ts`, which loads `native/out/bin[-<arch>]/haril_native.node` via `require()` (platform-aware: `bin` for x64, `bin-arm64` for arm64).
 

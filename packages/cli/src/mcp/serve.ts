@@ -8,7 +8,13 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { HarilSession, createSession, } from "../../../core/src/index.ts";
+import {
+  HarilSession,
+  SqliteStore,
+  createSession,
+  importPackageIntoStore,
+  readPackage,
+} from "../../../core/src/index.ts";
 import { z } from "zod";
 
 export interface ServeOptions {
@@ -28,7 +34,7 @@ export async function serveMcp(opts: ServeOptions): Promise<void> {
     }
   }
 
-  const server = new McpServer({ name: "haril", version: "0.1.0" });
+  const server = new McpServer({ name: "haril", version: "0.1.2" });
 
   registerTools(server, sessionHolder);
 
@@ -45,7 +51,6 @@ async function openPackage(session: HarilSession, path: string): Promise<void> {
   // The store is rebuilt on every open so the lifecycle is predictable.
   // We use a file instead of ":memory:" because the bundled binary appears
   // to mis-handle the in-memory database under some conditions.
-  const { SqliteStore, importPackageIntoStore, readPackage } = await import("../../../core/src/index.ts");
   const { mkdtempSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");

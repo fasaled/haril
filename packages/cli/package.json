@@ -1,6 +1,6 @@
 {
   "name": "@fasaled/haril",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "File-lifecycle reconstruction and analysis CLI",
   "type": "module",
   "license": "MIT",
@@ -11,7 +11,7 @@
   },
   "homepage": "https://github.com/fasaled/haril-ts",
   "engines": {
-    "bun": ">=1.3.0 <2"
+    "node": ">=22.5.0"
   },
   "os": ["win32", "linux", "darwin"],
   "bin": { "haril": "./dist/cli.js" },
@@ -21,7 +21,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "bun build src/cli.ts --outfile dist/cli.js --target bun --format esm",
+    "build": "bun build src/cli.ts --outfile dist/cli.js --target node --format esm --packages bundle",
     "prepack": "bun run --cwd ../.. build:package",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

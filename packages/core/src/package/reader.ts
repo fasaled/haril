@@ -3,6 +3,7 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import type { InventoryEntry, Manifest, NormalizedEvent, PathNotification, SourceEvent, UsnRecord } from "../model/types.ts";
 import { readZip } from "./zip.ts";
 
@@ -17,9 +18,7 @@ export interface PackageContents {
 }
 
 function sha256Hex(bytes: Uint8Array): string {
-  const hash = new Bun.CryptoHasher("sha256");
-  hash.update(bytes);
-  return hash.digest("hex");
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 const BIGINT_KEY_RE = /(?:^|_)(?:ns|serial|FileReference|fileRef|usn|Timestamp)(?:$|_)/i;

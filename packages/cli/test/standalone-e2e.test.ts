@@ -25,7 +25,7 @@ describe("standalone single-file binary e2e", () => {
   test("executes --version successfully", () => {
     const res = spawnSync(exePath, ["--version"], { encoding: "utf8" });
     expect(res.status).toBe(0);
-    expect(res.stdout).toContain("haril 0.1.0");
+    expect(res.stdout).toContain("haril 0.1.2");
   });
 
   test("executes help successfully", () => {

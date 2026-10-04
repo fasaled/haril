@@ -14,11 +14,15 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Made the top-level build degrade to analysis-only outside Windows.
 - Allowed MSBuild to select an installed Windows 10 or 11 SDK.
 - Clarified privacy, security, contribution, and release documentation.
+- Added Node.js 22.5+ compatibility to the npm CLI while retaining Bun 1.3.x
+  and standalone executable support.
 
-## [0.1.1] - 2026-10-04
+## [0.1.2] - 2026-10-04
 
 ### Changed
 
+- Added Node.js runtime support alongside Bun for the npm package, including a
+  runtime-neutral SQLite adapter and dual-runtime MCP end-to-end tests.
 - Prepared the npm package for republishing with the corrected reproducible
   standalone build and native addon packaging flow.
 

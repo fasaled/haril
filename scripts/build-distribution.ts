@@ -57,7 +57,18 @@ try {
   const args =
     mode === "standalone"
       ? ["build", entrypoint, "--compile", "--outfile", outfile]
-      : ["build", entrypoint, "--outfile", outfile, "--target", "bun", "--format", "esm"];
+      : [
+          "build",
+          entrypoint,
+          "--outfile",
+          outfile,
+          "--target",
+          "node",
+          "--format",
+          "esm",
+          "--packages",
+          "bundle",
+        ];
   const result = spawnSync(process.execPath, args, { stdio: "inherit" });
 
   if (result.error) throw result.error;

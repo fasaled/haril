@@ -9,6 +9,7 @@
 
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { createHash } from "node:crypto";
 import type { InventoryEntry, Manifest, NormalizedEvent, PathNotification, SourceEvent, UsnRecord } from "../model/types.ts";
 import { buildZip } from "./zip.ts";
 
@@ -23,9 +24,7 @@ export interface PackageInput {
 }
 
 function sha256Hex(bytes: Uint8Array): string {
-  const hash = new Bun.CryptoHasher("sha256");
-  hash.update(bytes);
-  return hash.digest("hex");
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function encodeJsonl<T>(rows: T[]): Uint8Array {

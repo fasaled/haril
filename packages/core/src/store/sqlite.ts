@@ -7,8 +7,8 @@
  * batched inserts.
  */
 
-import { Database } from "bun:sqlite";
 import { SCHEMA_SQL } from "./schema.ts";
+import { openRuntimeDatabase, type RuntimeDatabase } from "./runtime-sqlite.ts";
 import type { FileKey, NormalizedEvent, InventoryEntry, UsnRecord, PathNotification, EventKind, SourceId } from "../model/types.ts";
 import { fileKeyHash } from "../model/fileKey.ts";
 
@@ -86,7 +86,7 @@ export interface DirectoryEntry {
 }
 
 export class SqliteStore {
-  private db: Database;
+  private db: RuntimeDatabase;
   private batchBuffer: NormalizedEvent[] = [];
   private batchSize = 500;
   private batchTimeoutMs = 250;
@@ -94,7 +94,7 @@ export class SqliteStore {
   private flushTimer: Timer | null = null;
 
   constructor(private cfg: StoreConfig = {}) {
-    this.db = new Database(cfg.path ?? ":memory:");
+    this.db = openRuntimeDatabase(cfg.path ?? ":memory:");
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA_SQL);
