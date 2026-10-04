@@ -14,9 +14,10 @@
     "build:native:arm64": "powershell -ExecutionPolicy Bypass -File ./native/build-windows.ps1 -Platform arm64",
     "build:native:all": "powershell -ExecutionPolicy Bypass -File ./native/build-windows.ps1 -AllPlatforms",
     "build:exe": "bun --compile dist/haril.js --outfile dist/haril.exe",
+    "generate:icon": "bun run scripts/generate-ico.ts",
     "embed:native": "bun run scripts/embed-native.ts",
     "clean:embedded": "bun run scripts/embed-native.ts --clean",
-    "build:standalone": "bun run embed:native && bun build packages/cli/src/cli.ts --compile --outfile dist/haril.exe",
+    "build:standalone": "bun run embed:native && bun build packages/cli/src/cli.ts --compile --windows-icon=assets/icon.ico --windows-title=\"Haril-TS\" --windows-description=\"File-lifecycle reconstruction for Windows\" --outfile dist/haril.exe",
     "build": "bun run build:js && bun run build:native && bun run build:native:arm64 && bun run build:standalone",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test"
