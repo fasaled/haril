@@ -43,6 +43,10 @@ native/zig-cache/
 *.tmp
 *.temp
 
+# Haril capture packages (allow fixtures used in tests)
+*.haril
+!packages/core/test/fixtures/*.haril
+
 # OS generated files
 .DS_Store
 Thumbs.db

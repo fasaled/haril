@@ -116,6 +116,16 @@ The layout offsets discovered are:
 
 The `map_kind()` function maps opcode values to event kinds for both the Manifest provider and MOF Kernel FileIo provider.
 
+## Disruptor Lock-Free Ring Buffer (MPSC)
+
+Capture transfers high-throughput events from the Windows kernel to the Bun/TypeScript user space using an **in-memory lock-free Ring Buffer inspired by the LMAX Disruptor** (Multi-Producer Single-Consumer):
+- **Pre-allocated backing memory**: A contiguous 64 MiB buffer (262,144 slots of 256 bytes) allocated via Win32 `VirtualAlloc(PAGE_READWRITE)`.
+- **Concurrent lock-free claiming**: Producers (the high-frequency Kernel ETW callback running in dispatch context and the background NTFS USN journal worker) claim slots atomically using `head_seq_.fetch_add(1)`.
+- **Publication barriers**: Each slot has an aligned atomic sequence flag (`available_[index]`). Producers write their payload and publish `seq + 1` with `std::memory_order_release`.
+- **Zero-lock batch draining**: The consumer (`haril_drain` / `drain()`) reads batches of contiguous published slots up to the available threshold and updates `tail_seq_` with `std::memory_order_release`.
+
+This architecture prevents priority inversion, lock contention, and OS thread suspension inside the real-time ETW callback, avoiding kernel buffer overflows (`EventsLost`).
+
 ## USN reader
 
 A thread calls `DeviceIoControl(FSCTL_READ_USN_JOURNAL)` in a loop with a 1 MiB buffer. `USN_RECORD_V2` is parsed in place; if a record carries `FileId128` (V4) we extract it too. USN identity fields travel in the slot extension block at offsets [176..204].

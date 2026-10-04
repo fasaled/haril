@@ -120,6 +120,18 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 **Consequences:** Memory safety. No handle leaks. Reliable thread shutdown.
 
+## DEC-025B — Lock-Free Disruptor Ring Buffer (MPSC) for Kernel Event Streaming
+
+**Context:** The capture pipeline receives events from two independent native threads: the kernel ETW callback (`EtwEventCallback`, which runs at dispatch/kernel context and must never be blocked) and the NTFS USN journal polling thread (`usn_thread_entry`). Synchronizing these threads with a conventional mutex caused priority inversion and contention, leading to ETW buffer overruns (`EventsLost`) under heavy file I/O workloads.
+
+**Decision:** Replace the mutex-protected queue with an in-memory Lock-Free Ring Buffer based on the LMAX Disruptor pattern:
+- Pre-allocated 64 MiB buffer (262,144 slots of 256 bytes) via Win32 `VirtualAlloc`.
+- Atomic sequence claiming using `fetch_add` on `head_seq_`.
+- Slot publication barriers using an atomic sequence array (`available_`) with release semantics.
+- Batched zero-lock consumption in `pop_batch` tracking contiguous published sequences.
+
+**Consequences:** Complete elimination of lock contention. Zero kernel-callback stalls. Maximized event throughput and fidelity under heavy disk stress.
+
 ## DEC-026 — ZIP writer in-tree (STORE)
 
 **Decision:** A compact in-tree ZIP writer/reader (~120 lines). JSONL streams are already compact; the manifest SHA-256 protects integrity.

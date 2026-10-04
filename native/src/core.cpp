@@ -51,6 +51,9 @@ struct alignas(64) PaddedAtomic {
     std::atomic<std::uint64_t> v{0};
 };
 
+// Disruptor-style Lock-Free Multi-Producer Single-Consumer (MPSC) Ring Buffer.
+// Producers claim slots atomically using fetch_add and publish via monotonic flags.
+// The consumer tracks contiguous published slots, eliminating mutexes and thread blocking.
 class RingBuffer {
 public:
     RingBuffer() {
@@ -58,8 +61,19 @@ public:
             VirtualAlloc(nullptr, kRingBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
         if (!storage_) throw std::runtime_error("RingBuffer: VirtualAlloc failed");
         std::memset(storage_, 0, kRingBytes);
+
+        available_ = static_cast<std::atomic<std::uint64_t>*>(
+            VirtualAlloc(nullptr, kRingCapacity * sizeof(std::atomic<std::uint64_t>), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!available_) {
+            VirtualFree(storage_, 0, MEM_RELEASE);
+            throw std::runtime_error("RingBuffer: VirtualAlloc for available_ failed");
+        }
+        for (std::size_t i = 0; i < kRingCapacity; i++) {
+            new (&available_[i]) std::atomic<std::uint64_t>(0);
+        }
     }
     ~RingBuffer() {
+        if (available_) VirtualFree(available_, 0, MEM_RELEASE);
         if (storage_) VirtualFree(storage_, 0, MEM_RELEASE);
     }
     RingBuffer(const RingBuffer&) = delete;
@@ -67,42 +81,62 @@ public:
 
     bool push(std::span<const std::uint8_t> data) noexcept {
         if (data.size() > HARIL_SLOT_SIZE) return false;
-        std::lock_guard<std::mutex> lk(push_mutex_);
-        const auto h = head_.v.load(std::memory_order_relaxed);
-        const auto t = tail_.v.load(std::memory_order_acquire);
-        if (h - t >= kRingCapacity) return false;
-        std::uint8_t* dst = storage_ + (h % kRingCapacity) * HARIL_SLOT_SIZE;
+
+        // Atomically claim a sequence ticket (Disruptor claim phase)
+        const std::uint64_t seq = head_seq_.v.fetch_add(1, std::memory_order_relaxed);
+        const std::uint64_t t = tail_seq_.v.load(std::memory_order_acquire);
+
+        // Check if buffer is full (backpressure)
+        if (seq - t >= kRingCapacity) {
+            return false;
+        }
+
+        const std::size_t index = seq % kRingCapacity;
+        std::uint8_t* dst = storage_ + index * HARIL_SLOT_SIZE;
         std::memcpy(dst, data.data(), data.size());
         if (data.size() < HARIL_SLOT_SIZE) {
             std::memset(dst + data.size(), 0, HARIL_SLOT_SIZE - data.size());
         }
-        head_.v.store(h + 1, std::memory_order_release);
+
+        // Publish publication marker: seq + 1 (1-based to distinguish from 0 initial state)
+        available_[index].store(seq + 1, std::memory_order_release);
         return true;
     }
 
     int pop_batch(std::span<std::uint8_t> out, std::uint64_t* out_seq) noexcept {
-        const auto t = tail_.v.load(std::memory_order_relaxed);
-        const auto h = head_.v.load(std::memory_order_acquire);
+        const std::uint64_t t = tail_seq_.v.load(std::memory_order_relaxed);
         const int max_slots = static_cast<int>(out.size() / HARIL_SLOT_SIZE);
-        const int n = static_cast<int>(std::min<std::uint64_t>(max_slots, h - t));
-        for (int i = 0; i < n; i++) {
-            const std::uint8_t* src = storage_ + ((t + i) % kRingCapacity) * HARIL_SLOT_SIZE;
-            std::memcpy(out.data() + i * HARIL_SLOT_SIZE, src, HARIL_SLOT_SIZE);
+        int n = 0;
+
+        // Collect contiguous published slots
+        while (n < max_slots) {
+            const std::uint64_t seq = t + n;
+            const std::size_t index = seq % kRingCapacity;
+            // A slot is published if its available_ marker matches seq + 1
+            if (available_[index].load(std::memory_order_acquire) != seq + 1) {
+                break;
+            }
+            const std::uint8_t* src = storage_ + index * HARIL_SLOT_SIZE;
+            std::memcpy(out.data() + static_cast<std::size_t>(n) * HARIL_SLOT_SIZE, src, HARIL_SLOT_SIZE);
+            n++;
         }
-        tail_.v.store(t + n, std::memory_order_release);
-        if (out_seq) *out_seq = seq_high_.fetch_add(1, std::memory_order_relaxed) + 1;
+
+        if (n > 0) {
+            tail_seq_.v.store(t + n, std::memory_order_release);
+            if (out_seq) *out_seq = seq_high_.fetch_add(1, std::memory_order_relaxed) + 1;
+        }
         return n;
     }
 
     // Debug accessors
-    std::uint64_t head() const noexcept { return head_.v.load(std::memory_order_relaxed); }
-    std::uint64_t tail() const noexcept { return tail_.v.load(std::memory_order_relaxed); }
+    std::uint64_t head() const noexcept { return head_seq_.v.load(std::memory_order_relaxed); }
+    std::uint64_t tail() const noexcept { return tail_seq_.v.load(std::memory_order_relaxed); }
 
 private:
     std::uint8_t* storage_ = nullptr;
-    std::mutex push_mutex_;
-    PaddedAtomic head_;
-    PaddedAtomic tail_;
+    std::atomic<std::uint64_t>* available_ = nullptr;
+    PaddedAtomic head_seq_;
+    PaddedAtomic tail_seq_;
     std::atomic<std::uint64_t> seq_high_{0};
 };
 

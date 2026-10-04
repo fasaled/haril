@@ -44,6 +44,13 @@ Capture uses `haril_native.node`, a Node-API addon built from C++
 with MSBuild + MSVC. See [`docs/native.md`](docs/native.md) for the
 linker targets and build steps.
 
+The native capture engine uses a **Disruptor-style Lock-Free Ring Buffer (MPSC)**
+backed by `VirtualAlloc` (256k slots × 256 bytes = 64 MiB). Multiple producers
+(high-frequency Kernel ETW callback + background NTFS USN journal thread)
+claim sequence tickets atomically via `fetch_add` and publish via atomic slot
+markers. This eliminates lock contention and thread synchronization bottlenecks,
+preventing ETW buffer drops (`EventsLost`) even during heavy disk I/O.
+
 The addon is **required on Windows** for capture functionality
 (ETW + USN journal + FSW callbacks). Without it, the TUI
 `start-capture` command returns an error and no live capture is

@@ -55,9 +55,19 @@ if (IS_NATIVE_AVAILABLE) {
       // 5. FSW notifications deberían estar presentes
       expect(result.notifications.length).toBeGreaterThanOrEqual(0);
 
-      // 6. ETW/USN should have availability flags (may be false depending on elevation)
+      // 6. ETW/USN should have availability flags
       expect(typeof result.manifest.sources.etw.available).toBe("boolean");
       expect(typeof result.manifest.sources.usn.available).toBe("boolean");
+
+      // Si el proceso corre elevado (isAdmin === 1), ETW y USN deben ser true
+      const lib = native();
+      if (lib && lib.isAdmin() === 1) {
+        expect(result.manifest.sources.etw.available).toBe(true);
+        expect(result.manifest.sources.usn.available).toBe(true);
+        // Debe haber eventos capturados directamente de ETW
+        const etwEvents = result.events.filter((e) => e.source === "etw");
+        expect(etwEvents.length).toBeGreaterThan(0);
+      }
 
       // 7. Verificar que el manifiesto se escribió correctamente
       expect(result.manifest.sessionId).toBeDefined();

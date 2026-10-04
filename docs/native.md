@@ -44,9 +44,6 @@ The output is `haril_native.node` (`bin-arm64` for arm64).
 
 The C++ source is C++20 with selected C++23 features (`std::jthread`, `std::span`). MSBuild targets `<LanguageStandard>stdcpplatest</LanguageStandard>`.
 
-### Why MSVC, not Zig
-
-Zig 0.16 (aarch64) installed on Windows-arm64 hosts crashes with ACCESS_VIOLATION (`0xC0000005`) when cross-compiling real C++ for `x86_64-windows-msvc`. MSVC's bundled cl.exe + link.exe produce a valid DLL without that crash.
 
 ### Why Node-API addon, not `bun:ffi` / DLL
 
@@ -100,6 +97,15 @@ The addon exports 18 N-API functions wrapped in `napi_addon.cpp`. The public hea
 | `haril_drain()` | Drain ring buffer slot into buffer (256 bytes each) |
 
 Strings are UTF-16LE with explicit length because N-API does not auto-convert UTF-8 to UTF-16LE; the `napi_addon.cpp` wrapper converts JS strings on the way in.
+
+## Disruptor Ring Buffer Engine (Lock-Free MPSC)
+
+The ring buffer implements the LMAX Disruptor pattern for Multi-Producer Single-Consumer (MPSC) concurrency without locks:
+- Pre-allocated 64 MiB ring storage (262,144 slots × 256 bytes) via Win32 `VirtualAlloc`.
+- Ticket-claiming via atomic `fetch_add` on `head_seq_`.
+- Publication flags (`available_`) per slot updated with `std::memory_order_release`.
+- Batch consumer reading up to contiguous published sequences, updating `tail_seq_`.
+- Guarantees zero-lock dispatching from the Windows Kernel ETW callback thread, completely eliminating priority inversion and mutex stalls.
 
 ## Slot layout (256 bytes, little-endian)
 
