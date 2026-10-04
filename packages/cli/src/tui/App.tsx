@@ -377,6 +377,8 @@ export const App: React.FC<AppProps> = ({ session }) => {
   };
 
   const loadEventsForKey = async (target: string) => {
+    setSelectedEvent(null);
+    setSelectedEventIndex(0);
     setEventsLoading(true);
     try {
       const result = await session.runCommand(parseCommand(`events ${target} --limit 1000`));
@@ -386,7 +388,7 @@ export const App: React.FC<AppProps> = ({ session }) => {
           : (result.data as any).items ?? [];
         setEvents(items);
         setSelectedEventIndex(0);
-        setSelectedEvent(items[0] || null);
+        setSelectedEvent(null);
       }
     } catch (e) {
       console.error("loadEvents error:", e);
@@ -671,32 +673,17 @@ export const App: React.FC<AppProps> = ({ session }) => {
             )}
           </Box>
           <Box width="40%" height="100%">
-            {selectedEvent ? (
-              <EventDetail
-                event={selectedEvent}
-                baseNs={snap.packageManifest?.startedAt}
-                fileKey={null}
-                isFocused={focusedPanel === "detail"}
-                onClose={() => {
-                  setSelectedEvent(null);
-                  setSelectedEventIndex(0);
-                  setFocusedPanel("prompt");
-                }}
-              />
-            ) : (
-              <Box
-                borderStyle="round"
-                borderColor="gray"
-                width="100%"
-                height="100%"
-                paddingX={2}
-                paddingY={1}
-                justifyContent="center"
-                alignItems="center"
-              >
-                <Text dimColor>Select an event from the list to view its details (Esc to close)</Text>
-              </Box>
-            )}
+            <EventDetail
+              event={selectedEvent}
+              baseNs={snap.packageManifest?.startedAt}
+              fileKey={null}
+              isFocused={focusedPanel === "detail"}
+              onClose={() => {
+                setSelectedEvent(null);
+                setSelectedEventIndex(0);
+                setFocusedPanel("prompt");
+              }}
+            />
           </Box>
         </Box>
 

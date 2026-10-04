@@ -19,9 +19,6 @@ export const EventDetail: React.FC<EventDetailProps> = ({ event, fileKey, isFocu
   if (!event) {
     return (
       <InkBox flexDirection="column" borderStyle="round" borderColor={isFocused ? "cyan" : "gray"} width="100%" height="100%">
-        <Box marginLeft={1} marginTop={1}>
-          <Text dimColor>Select an event to view details</Text>
-        </Box>
       </InkBox>
     );
   }
