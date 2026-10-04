@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
-import type { NormalizedEvent, FileKey } from "@haril-ts/core";
+import type { NormalizedEvent, FileKey } from "../../../../core/src/index.ts";
 import { Box as InkBox } from "ink";
 import { eventTimestampNs, formatEventTime } from "../format.ts";
 

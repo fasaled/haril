@@ -17,7 +17,7 @@ import { App } from "./tui/App.tsx";
 import { KEYBOARD_HELP } from "./tui/keys.ts";
 import { serveMcp } from "./mcp/serve.ts";
 import { runCompletion } from "./completion.ts";
-import { HarilSession, createSession } from "@haril-ts/core";
+import { HarilSession, createSession } from "../../core/src/index.ts";
 import { resumePendingSession } from "./resume.ts";
 
 const VERSION = "0.1.0";

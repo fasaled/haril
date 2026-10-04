@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
-import type { LiveCaptureState, LiveEvent } from "@haril-ts/core";
+import type { LiveCaptureState, LiveEvent } from "../../../../core/src/index.ts";
 import { formatOffsetNs } from "../format.ts";
 
 export interface LiveCapturePanelProps {

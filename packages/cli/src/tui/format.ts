@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { SessionSnapshot } from "@haril-ts/core";
+import type { SessionSnapshot } from "../../../core/src/index.ts";
 
 /**
  * Timestamps reach the UI in several shapes: `bigint` from live capture,

@@ -8,7 +8,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { HarilSession, createSession, importPackageIntoStore } from "@haril-ts/core";
+import { HarilSession, createSession, importPackageIntoStore } from "../../../core/src/index.ts";
 import { z } from "zod";
 import { readFile } from "node:fs/promises";
 
@@ -46,7 +46,7 @@ async function openPackage(session: HarilSession, path: string): Promise<void> {
   // The store is rebuilt on every open so the lifecycle is predictable.
   // We use a file instead of ":memory:" because the bundled binary appears
   // to mis-handle the in-memory database under some conditions.
-  const { SqliteStore, importPackageIntoStore, readPackage } = await import("@haril-ts/core");
+  const { SqliteStore, importPackageIntoStore, readPackage } = await import("../../../core/src/index.ts");
   const { mkdtempSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");

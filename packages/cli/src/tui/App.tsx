@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Box, Text, useInput, useApp, useWindowSize } from "ink";
-import type { HarilSession, SessionSnapshot, NormalizedEvent, EventKind, Phase, LiveCaptureState } from "@haril-ts/core";
-import { CommandQueue, parseCommand, type QueuedCommand } from "@haril-ts/core";
+import type { HarilSession, SessionSnapshot, NormalizedEvent, EventKind, Phase, LiveCaptureState } from "../../../core/src/index.ts";
+import { CommandQueue, parseCommand, type QueuedCommand } from "../../../core/src/index.ts";
 import { Header } from "./components/Header.tsx";
 import { Prompt, type OutputLine } from "./components/Prompt.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";

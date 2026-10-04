@@ -6,7 +6,7 @@
 import { readFileSync, existsSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import type { HarilSession, StartCaptureArgs } from "@haril-ts/core";
+import type { HarilSession, StartCaptureArgs } from "../../core/src/index.ts";
 
 function pendingPath(): string {
   const appdata = process.env["LOCALAPPDATA"] ?? tmpdir();

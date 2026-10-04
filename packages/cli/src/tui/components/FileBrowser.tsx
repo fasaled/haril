@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
-import type { EventKind } from "@haril-ts/core";
+import type { EventKind } from "../../../../core/src/index.ts";
 
 export interface FileItem {
   fileKeyHash: string;

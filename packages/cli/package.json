@@ -1,24 +1,31 @@
 {
-  "name": "@haril-ts/cli",
+  "name": "@fasaled/haril",
   "version": "0.1.0",
+  "description": "File-lifecycle reconstruction and analysis CLI",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fasaled/haril-ts.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/fasaled/haril-ts",
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "os": ["win32", "linux", "darwin"],
   "bin": { "haril": "./dist/cli.js" },
+  "files": [
+    "dist/cli.js",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "bun build src/cli.ts --outfile dist/cli.js --target node --format esm --banner '#!/usr/bin/env node'",
+    "build": "bun build src/cli.ts --outfile dist/cli.js --target bun --format esm",
+    "prepack": "bun run --cwd ../.. build:package",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
-  "dependencies": {
-    "@haril-ts/core": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "ink": "^7.1.1",
-    "ink-text-input": "^6.0.0",
-    "react": "^19.3.0"
-  },
-  "devDependencies": {
-    "@types/react": "^19.3.0"
-  },
-  "engines": {
-    "node": ">=20"
+  "publishConfig": {
+    "access": "public"
   }
 }

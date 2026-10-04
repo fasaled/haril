@@ -8,6 +8,7 @@ build/
 out/
 native/out/
 *.bun-build
+*.tgz
 
 # MSVC / C++ intermediate and output files
 obj/

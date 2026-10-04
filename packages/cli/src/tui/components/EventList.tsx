@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
-import type { NormalizedEvent, EventKind, SourceId, FileKey } from "@haril-ts/core";
+import type { NormalizedEvent, EventKind, SourceId, FileKey } from "../../../../core/src/index.ts";
 import { Box as InkBox } from "ink";
 import { eventTimestampNs, formatEventTime } from "../format.ts";
 

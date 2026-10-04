@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { SessionSnapshot } from "@haril-ts/core";
+import type { SessionSnapshot } from "../../../../core/src/index.ts";
 
 export const Header: React.FC<{ snapshot: SessionSnapshot }> = ({ snapshot }) => {
   const sources = snapshot.sourceStatus;

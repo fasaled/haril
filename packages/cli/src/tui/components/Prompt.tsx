@@ -1,8 +1,8 @@
 import React, { useState, useCallback } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
-import type { HarilSession, Phase, CompleteContext } from "@haril-ts/core";
-import { complete, getVisibleSuggestionsWindow, applyCompletion } from "@haril-ts/core";
+import type { HarilSession, Phase, CompleteContext } from "../../../../core/src/index.ts";
+import { complete, getVisibleSuggestionsWindow, applyCompletion } from "../../../../core/src/index.ts";
 
 export interface OutputLine {
   id: string;
