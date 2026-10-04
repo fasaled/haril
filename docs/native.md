@@ -2,9 +2,7 @@
 
 Haril-TS captures kernel ETW events, USN journal records, and per-file identities through a Node-API addon: `haril_native.node`. The TypeScript side loads it via `require()`.
 
-## Why a Node-API addon
-
-`bun:ffi.dlopen()` is disabled in Bun 1.3.14 (TinyCC disabled), so a DLL loaded via `dlopen` cannot be used from JS in the current environment. A Node-API addon (`*.node`) loaded with plain `require()` works because the N-API surface is resolved dynamically at runtime via `GetProcAddress/GetModuleHandle(NULL)` — no `node.lib` link dependency at load time.
+## Node-API addon
 
 The addon is **required on Windows** for capture functionality (ETW + USN journal + FSW callbacks). Without it, the TUI `start-capture` command returns an error and no live capture is possible. However, opening and analyzing existing `.haril` packages still works — the TUI enters analyze phase with a summary indicating the addon is missing.
 
@@ -45,11 +43,9 @@ The output is `haril_native.node` (`bin-arm64` for arm64).
 The C++ source is C++20 with selected C++23 features (`std::jthread`, `std::span`). MSBuild targets `<LanguageStandard>stdcpplatest</LanguageStandard>`.
 
 
-### Why Node-API addon, not `bun:ffi` / DLL
+### Addon loading
 
-`bun:ffi.dlopen()` is disabled in Bun 1.3.14 (TinyCC disabled), so a DLL loaded via `dlopen` cannot be used from JS in the current environment. A direct `LoadLibraryW` smoke test of the DLL succeeds, proving the native code itself is sound. But the FFI path is blocked by the Bun version's TinyCC restriction.
-
-**Decision:** Ship the native core as a Node-API addon (`haril_native.node`, `NAPI_MODULE_INIT`) and load it with plain `require()`. `packages/core/src/ffi/bindings.ts` resolves the file platform-aware (`bin` for x64, `bin-arm64` for arm64) and returns `null` when it cannot load, preserving analyze-only degradation. `node.lib` (per arch, from `nodejs.org/dist`) is linked at build time; it is downloaded by `build-windows.ps1` and gitignored.
+The native core is shipped as a Node-API addon (`haril_native.node`, `NAPI_MODULE_INIT`) and loaded with plain `require()`. `packages/core/src/ffi/bindings.ts` resolves the file platform-aware (`bin` for x64, `bin-arm64` for arm64) and returns `null` when it cannot load, preserving analyze-only degradation. `node.lib` (per arch, from `nodejs.org/dist`) is linked at build time; it is downloaded by `build-windows.ps1` and gitignored.
 
 ## C++ style guide (modern, RAII-first)
 

@@ -100,7 +100,7 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 ## DEC-023 — Bun-only runtime (not Node-compatible) at development time
 
-**Decision:** The project uses `bun:sqlite` for all persistence. The test suite and build scripts assume Bun. A Node-published binary would need `better-sqlite3` instead of `bun:sqlite`, and the FFI path would differ.
+**Decision:** The project uses `bun:sqlite` for all persistence. The test suite and build scripts assume Bun. A Node-published binary would need `better-sqlite3` instead of `bun:sqlite`.
 
 **Consequences:** Development, testing, and CI all run under Bun. The published Windows binary bundles JS via Bun's compiler.
 
@@ -110,7 +110,7 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 **Decision:** The native addon is built with `msbuild.exe` from a `.vcxproj` project targeting `x64` and `v143`. The C++ source uses C++20 + selected C++23 features (`std::jthread`, `std::span`, RAII). MSBuild targets `<LanguageStandard>stdcpplatest</LanguageStandard>`.
 
-**Consequences:** The DLL is verified end-to-end on this host: a separate smoke test that calls `LoadLibraryW("haril_native.dll")` followed by the exported functions runs successfully. The DLL can be loaded by any Windows runtime (including Bun with `bun:ffi.dlopen` enabled, Node with `node-ffi-napi`, etc.). On this Bun 1.3.14 build (TinyCC disabled), `bun:ffi.dlopen` fails to load the DLL; the runtime degrades gracefully to analyze-only.
+**Consequences:** The native library was verified end-to-end on this host with a `LoadLibraryW` smoke test and calls to its exported functions.
 
 ## DEC-025 — Modern C++ style in the native addon
 
@@ -136,9 +136,9 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 **Consequences:** No external ZIP dependency. The package writer is auditable and small.
 
-## DEC-027 — Native addon loads via `require()`, not `bun:ffi`
+## DEC-027 — Native addon loads via `require()`
 
-**Context:** `bun:ffi.dlopen()` reports "TinyCC is disabled" on Bun 1.3.14 here, so the FFI path can never work in this environment. A direct `LoadLibraryW` smoke test of the DLL succeeds, proving the native code itself is sound.
+**Context:** Native capture functionality is exposed to TypeScript through a Node-API addon.
 
 **Decision:** Ship the native core as a Node-API addon (`haril_native.node`, `NAPI_MODULE_INIT`) and load it with plain `require()`, exactly like other per-platform binaries. `packages/core/src/ffi/bindings.ts` resolves the file platform-aware (`bin` for x64, `bin-arm64` for arm64) and returns `null` when it cannot load, preserving analyze-only degradation. `node.lib` (per arch, from `nodejs.org/dist`) is linked at build time; it is downloaded by `build-windows.ps1` and gitignored.
 
