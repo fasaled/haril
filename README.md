@@ -1,4 +1,4 @@
-# Haril-TS
+# Haril
 
 File-lifecycle reconstruction for NTFS Windows, in **Bun + TypeScript**.
 
