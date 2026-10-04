@@ -38,8 +38,13 @@ export interface NativeFileId {
   volumeSerial: number;
 }
 
+/** Slot size of the ring-buffer layout this build decodes. */
+export const NATIVE_SLOT_SIZE = 1024;
+
 export interface NativeBindings {
   version: string;
+  /** Bytes per ring slot; must equal NATIVE_SLOT_SIZE. */
+  slotSize?: number;
   openSession: () => unknown;
   closeSession: (ctx: unknown) => void;
   sourceStatus: (ctx: unknown, source: number) => number;
@@ -61,7 +66,7 @@ export interface NativeBindings {
   usnStop: (ctx: unknown) => number;
   usnRecordsRead: (ctx: unknown) => bigint;
   usnDroppedUnresolved: (ctx: unknown) => bigint;
-  /** Returns an ArrayBuffer of n*256 bytes (one 256-byte slot each). */
+  /** Returns an ArrayBuffer of n*slotSize bytes (whole records only). */
   drain: (ctx: unknown, maxSlots: number) => ArrayBuffer;
   isAdmin: () => number;
   nowNs: () => bigint;
@@ -185,7 +190,14 @@ export function native(): NativeBindings | null {
     try {
       const req = createRequire(import.meta.url);
       const mod = req(p) as NativeBindings;
-      if (mod && typeof mod.openSession === "function" && typeof mod.version === "string") {
+      if (
+        mod &&
+        typeof mod.openSession === "function" &&
+        typeof mod.version === "string" &&
+        // An addon with another slot layout (stale build/extraction) would
+        // decode as garbage: skip it and keep looking.
+        mod.slotSize === NATIVE_SLOT_SIZE
+      ) {
         cached = mod;
         return cached;
       }

@@ -2,9 +2,12 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
 import type { NormalizedEvent, EventKind, SourceId, FileKey } from "@haril-ts/core";
 import { Box as InkBox } from "ink";
+import { eventTimestampNs, formatEventTime } from "../format.ts";
 
 export interface EventListProps {
   events: NormalizedEvent[];
+  /** Capture start (QPC ns); timestamps are shown relative to it. */
+  baseNs?: unknown;
   fileKey: FileKey | null;
   selectedIndex: number;
   onSelect: (index: number) => void;
@@ -13,6 +16,7 @@ export interface EventListProps {
   isFocused: boolean;
   filter?: { kinds?: EventKind[]; failedOnly?: boolean; pid?: number; process?: string };
   loading: boolean;
+  visibleHeight?: number;
 }
 
 const EVENT_KIND_COLORS: Record<EventKind, string> = {
@@ -36,6 +40,7 @@ const SOURCE_COLORS: Record<SourceId, string> = {
 
 export const EventList: React.FC<EventListProps> = ({
   events,
+  baseNs,
   fileKey,
   selectedIndex,
   onSelect,
@@ -44,9 +49,10 @@ export const EventList: React.FC<EventListProps> = ({
   isFocused,
   filter,
   loading,
+  visibleHeight: propVisibleHeight,
 }) => {
   const [scrollOffset, setScrollOffset] = useState(0);
-  const visibleHeight = useMemo(() => 15, []);
+  const visibleHeight = propVisibleHeight ?? 15;
   const [showFilterMenu, setShowFilterMenu] = useState(false);
 
   const filteredEvents = useMemo(() => {
@@ -158,15 +164,14 @@ export const EventList: React.FC<EventListProps> = ({
   ) : null;
 
   const borderColor = isFocused ? "cyan" : "gray";
-  const title = isFocused ? " EVENTS (focused) " : ` EVENTS ${filterDesc ? `· ${filterDesc}` : ""} `;
 
   return (
     <InkBox flexDirection="column" borderStyle="round" borderColor={borderColor} width="100%" height="100%">
-      <Box>
-        <Text backgroundColor={isFocused ? "cyan" : "gray"} color="white">
-          {title}
-        </Text>
-      </Box>
+      {filterDesc ? (
+        <Box marginLeft={1}>
+          <Text dimColor>filter: {filterDesc}</Text>
+        </Box>
+      ) : null}
       {loading && <Text color="yellow">  Loading...</Text>}
       {showFilterMenu && filterMenu}
       <Box flexDirection="column" flexGrow={1}>
@@ -175,7 +180,7 @@ export const EventList: React.FC<EventListProps> = ({
           const isSelected = absoluteIndex === selectedIndex;
           const isFocusedItem = isSelected && isFocused;
           
-          const timestamp = formatTimestamp(event.timestamp_ns);
+          const timestamp = formatEventTime(eventTimestampNs(event), baseNs);
           const kindColor = EVENT_KIND_COLORS[event.eventKind] || "white";
           const sourceColor = SOURCE_COLORS[event.source] || "white";
           
@@ -210,9 +215,3 @@ export const EventList: React.FC<EventListProps> = ({
     </InkBox>
   );
 };
-
-function formatTimestamp(ns: bigint): string {
-  const ms = Number(ns / 1000000n);
-  const date = new Date(ms);
-  return date.toISOString().slice(11, 23); // HH:MM:SS.mmm
-}

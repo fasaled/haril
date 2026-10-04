@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { SessionSnapshot } from "@haril-ts/core";
+import { displayCwd } from "../format.ts";
 
 export const StatusBar: React.FC<{ snapshot: SessionSnapshot }> = ({ snapshot }) => {
   const filter = snapshot.activeEventFilter;
@@ -17,10 +18,12 @@ export const StatusBar: React.FC<{ snapshot: SessionSnapshot }> = ({ snapshot })
     : "";
 
   return (
-    <Box>
+    <Box paddingX={1} flexShrink={0}>
       <Text dimColor>
-        {" : \\ s v c h ? n N o f p e r  Ctrl+Q  "}
-        {filterDesc ? " · " + filterDesc : ""}
+        cwd: <Text color="white">{displayCwd(snapshot)}</Text>
+        {snapshot.heuristicsEnabled ? <Text color="magenta"> · heuristics: on</Text> : null}
+        {snapshot.zoomRange ? <Text color="cyan"> · zoomed</Text> : null}
+        {filterDesc ? <Text color="yellow"> · {filterDesc}</Text> : null}
       </Text>
     </Box>
   );

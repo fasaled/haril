@@ -11,7 +11,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -71,7 +71,7 @@ if (IS_NATIVE_AVAILABLE) {
 
       // 7. Verificar que el manifiesto se escribió correctamente
       expect(result.manifest.sessionId).toBeDefined();
-      expect(result.manifest.root).toBe(root);
+      expect(result.manifest.root).toBe(realpathSync.native(root));
       expect(result.manifest.fsKind).toBe("ntfs");
 
       // 8. Events should have source diversity (some fsw, possibly etw/usn)

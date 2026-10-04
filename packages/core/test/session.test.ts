@@ -4,7 +4,7 @@
  */
 
 import { describe, test, expect, beforeAll } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
@@ -13,7 +13,7 @@ import { writePackage } from "../src/package/writer.ts";
 import { readPackage } from "../src/package/reader.ts";
 import { importPackageIntoStore } from "../src/store/import.ts";
 import { SqliteStore } from "../src/store/sqlite.ts";
-import { HarilSession } from "../src/session.ts";
+import { HarilSession, defaultCaptureFileName } from "../src/session.ts";
 import type { InventoryEntry, NormalizedEvent, Manifest } from "../src/model/types.ts";
 
 let packagePath: string;
@@ -237,10 +237,39 @@ describe("session", () => {
   test("pwd and cd change working directory", async () => {
     const pwd1 = await session.run("pwd");
     expect(pwd1.ok).toBe(true);
+    expect((pwd1.data as { cwd: string; path: string }).cwd).toBe("\\");
+    expect((pwd1.data as { cwd: string; path: string }).path).toBe("C:\\Work\\Target");
 
     const cd = await session.run("cd src");
     expect(cd.ok).toBe(true);
-    expect(session.snapshot().cwd).toContain("src");
+    expect(session.snapshot().cwd).toBe("\\src");
+    expect((cd.data as { path: string }).path).toBe("C:\\Work\\Target\\src");
+
+    // ls honours the cwd
+    const inSrc = await session.run("ls");
+    const srcPaths = (inSrc.data as { items: { path: string }[] }).items.map((i) => i.path);
+    expect(srcPaths).toContain("\\src\\index.ts");
+    expect(srcPaths.every((p) => p.toLowerCase().startsWith("\\src\\"))).toBe(true);
+
+    // unknown directories are rejected and cwd is preserved
+    const bad = await session.run("cd nope");
+    expect(bad.ok).toBe(false);
+    expect(session.snapshot().cwd).toBe("\\src");
+
+    // `..`, root-relative and absolute paths inside the capture root
+    expect((await session.run("cd ..")).ok).toBe(true);
+    expect(session.snapshot().cwd).toBe("\\");
+    expect((await session.run("cd \\src")).ok).toBe(true);
+    expect(session.snapshot().cwd).toBe("\\src");
+    expect((await session.run('cd "C:\\Work\\Target"')).ok).toBe(true);
+    expect(session.snapshot().cwd).toBe("\\");
+    expect((await session.run("cd C:\\Elsewhere")).ok).toBe(false);
+
+    // ls with an explicit directory argument
+    const lsSrc = await session.run("ls src");
+    expect((lsSrc.data as { items: unknown[] }).items.length).toBeGreaterThan(0);
+    const lsNone = await session.run("ls nope");
+    expect((lsNone.data as { items: unknown[] }).items.length).toBe(0);
   });
 
   test("pagination flags offset and limit are respected", async () => {
@@ -268,12 +297,14 @@ describe("session", () => {
 
   test("empty phase rejects unknown commands", () => {
     const empty = new HarilSession();
-    return expect(empty.run("ls")).resolves.toEqual(expect.objectContaining({ ok: false }));
+    return expect(empty.run("events")).resolves.toEqual(expect.objectContaining({ ok: false }));
   });
 
-  test("empty phase start-capture requires args", () => {
+  test("empty phase start-capture rejects flags without values", async () => {
     const empty = new HarilSession();
-    return expect(empty.run("start-capture")).resolves.toEqual(expect.objectContaining({ ok: false }));
+    expect((await empty.run("start-capture --root")).ok).toBe(false);
+    expect((await empty.run("start-capture --output")).ok).toBe(false);
+    expect(empty.snapshot().phase).toBe("empty");
   });
 
   test("start-capture runs a real window and opens the package", async () => {
@@ -307,4 +338,100 @@ describe("session", () => {
     expect((ov.data as { totalEvents: number }).totalEvents).toBeGreaterThanOrEqual(1);
     session.close();
   }, 30000);
+
+  test("empty phase ls/cd/pwd navigate the real filesystem", async () => {
+    const tmp = realpathSync.native(mkdtempSync(join(tmpdir(), "haril-fsnav-test-")));
+    mkdirSync(join(tmp, "sub"));
+    writeFileSync(join(tmp, "a.txt"), "hello");
+    writeFileSync(join(tmp, "b.log"), "x");
+    const prevCwd = process.cwd();
+    const session = new HarilSession();
+    try {
+      const cd = await session.run(`cd ${JSON.stringify(tmp)}`);
+      expect(cd.ok).toBe(true);
+      expect(realpathSync.native(process.cwd())).toBe(tmp);
+
+      const pwd = await session.run("pwd");
+      expect(pwd.ok).toBe(true);
+      expect(realpathSync.native(String(pwd.data))).toBe(tmp);
+
+      const ls = await session.run("ls");
+      expect(ls.ok).toBe(true);
+      const lines = String(ls.data).split("\n");
+      expect(lines.some((l) => l.endsWith("sub\\") && l.includes("<dir>"))).toBe(true);
+      expect(lines.some((l) => /\b5\s+a\.txt$/.test(l))).toBe(true);
+
+      const filtered = await session.run("ls --pattern *.log");
+      expect(String(filtered.data)).toContain("b.log");
+      expect(String(filtered.data)).not.toContain("a.txt");
+
+      expect((await session.run("cd sub")).ok).toBe(true);
+      expect(realpathSync.native(process.cwd())).toBe(join(tmp, "sub"));
+      expect((await session.run("cd ..")).ok).toBe(true);
+      expect((await session.run("cd missing-dir")).ok).toBe(false);
+      expect((await session.run("cd a.txt")).ok).toBe(false);
+      expect(session.snapshot().phase).toBe("empty");
+    } finally {
+      process.chdir(prevCwd);
+      session.close();
+    }
+  });
+  test("defaultCaptureFileName uses a local timestamp", () => {
+    expect(defaultCaptureFileName(new Date(2026, 9, 4, 9, 5, 7))).toBe("haril-20261004-090507.haril");
+  });
+
+  test("start-capture without --root/--output captures the working directory into a timestamped package", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "haril-defout-test-"));
+    const root = join(tmp, "watched");
+    mkdirSync(root);
+    writeFileSync(join(root, "a.txt"), "hello");
+    const prevCwd = process.cwd();
+    process.chdir(tmp);
+    const session = new HarilSession();
+    try {
+      process.chdir(root);
+      const res = await session.run("start-capture --seconds 1");
+      expect(res.ok).toBe(true);
+      expect(session.snapshot().packageManifest?.root).toBe(realpathSync.native(root));
+      process.chdir(tmp);
+      const written = readdirSync(root).filter((n) => /^haril-\d{8}-\d{6}\.haril$/.test(n));
+      expect(written.length).toBe(1);
+      expect(session.snapshot().packagePath).toBe(join(root, written[0]!));
+    } finally {
+      session.close();
+      process.chdir(prevCwd);
+    }
+  }, 30000);
+  test("prevents simultaneous captures and supports background stop", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "haril-simul-test-"));
+    const root = join(tmp, "watched");
+    mkdirSync(root);
+    const out = join(tmp, "out-simul.haril");
+    const out2 = join(tmp, "out-simul2.haril");
+
+    const sess = new HarilSession();
+    // Start background capture
+    const first = await sess.run(
+      `start-capture --root ${JSON.stringify(root)} --output ${JSON.stringify(out)} --seconds 10 --background`,
+    );
+    expect(first.ok).toBe(true);
+    expect(sess.isCapturing).toBe(true);
+    expect(sess.snapshot().phase).toBe("live-capture");
+
+    // Second capture attempt must fail
+    const second = await sess.run(
+      `start-capture --root ${JSON.stringify(root)} --output ${JSON.stringify(out2)} --seconds 10 --background`,
+    );
+    expect(second.ok).toBe(false);
+    expect(second.error).toContain("capture already in progress");
+
+    // Stop active capture early
+    const stopped = await sess.run("stop-capture");
+    expect(stopped.ok).toBe(true);
+    await sess.waitForActiveCapture();
+
+    expect(sess.isCapturing).toBe(false);
+    expect(sess.snapshot().phase).toBe("analyze");
+    sess.close();
+  });
 });

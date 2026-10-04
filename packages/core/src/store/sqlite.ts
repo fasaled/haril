@@ -356,6 +356,11 @@ export class SqliteStore {
     const params: unknown[] = [];
     let where = "WHERE 1=1";
 
+    const dirPrefix = normalizeDirPrefix(opts.directory);
+    if (dirPrefix) {
+      where += " AND f.path LIKE ? ESCAPE '|'";
+      params.push(escapeLike(dirPrefix) + "%");
+    }
     if (opts.identityKind === "exact") {
       where += " AND f.kind = 'exact'";
     } else if (opts.identityKind === "path") {
@@ -684,4 +689,18 @@ export class SqliteStore {
         .get() ?? null
     );
   }
+}
+/**
+ * Root-relative directory (`\`, `\sub`, `sub\dir`) to a LIKE prefix
+ * (`\sub\`). Returns null for the capture root, which matches everything.
+ */
+export function normalizeDirPrefix(directory: string | undefined): string | null {
+  if (!directory) return null;
+  const parts = directory.replace(/\//g, "\\").split("\\").filter((p) => p.length > 0 && p !== ".");
+  if (parts.length === 0) return null;
+  return "\\" + parts.join("\\") + "\\";
+}
+
+function escapeLike(s: string): string {
+  return s.replace(/[|%_]/g, (c) => "|" + c);
 }

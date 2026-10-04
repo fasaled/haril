@@ -46,10 +46,16 @@ The TUI has three phases, controlled entirely by the command prompt:
 | Phase | Entry Command | Exit Command |
 |---|---|---|
 | **empty** | `haril` (no args) | `open <path.haril>` → analyze; `start-capture …` → live-capture |
-| **live-capture** | `start-capture --root <dir> --output <file.haril> --seconds <n>` | `stop-capture` → analyze; `force-quit-capture` → empty |
+| **live-capture** | `start-capture [--root <dir>] [--output <file.haril>] [--seconds <n>]` | `stop-capture` → analyze; `force-quit-capture` → empty |
 | **analyze** | `open <path.haril>` | `close` → empty |
 
 The header, status bar, and prompt hint update to reflect the active phase.
+
+Sections are reached from the keyboard: `Ctrl+F` files, `Ctrl+E` events, `Ctrl+D` detail (each toggles back to the prompt), `Tab` cycles sections outside the prompt, `Esc` or `:` returns to the prompt. The `help` command prints the command list followed by this keyboard reference (`packages/cli/src/tui/keys.ts`), which is also shown by the `?` overlay and `haril help`.
+
+`start-capture` runs in the background: the UI thread stays free and only one capture can run at a time. While it runs, the live view streams what the capture observes: a horizontal file selector (pre-existing files from the initial inventory plus files created during the window, with `(all)` to show everything) and a tailing event stream with timestamps relative to the capture start (`↑/↓/PgUp/PgDn` scroll, `End` resumes following). When the window ends (or `stop-capture`), the package is written and the TUI switches to analyze automatically without exiting.
+
+Relative `--root`/`--output` paths are resolved against the process working directory. Without `--root`, the working directory itself is captured; without `--output`, the package is written there as `haril-YYYYMMDD-HHMMSS.haril` (local time); `--seconds` defaults to 30. Inside a package, `cwd` is relative to the capture root (`\`, `\sub`); the status bar shows the real location (capture root + `cwd`), or the process working directory when no package is loaded. `cd` accepts relative (`sub`, `..`), root-relative (`\sub`) and absolute paths inside the capture root, and rejects directories with no observed files; `ls` lists files under the current (or given) directory. Outside a package (empty and live-capture phases), `ls`, `cd` and `pwd` work on the real filesystem and change the process working directory, so you can move to the folder to capture and use relative `--root`/`--output` paths.
 
 ## `.haril` package format
 
@@ -104,32 +110,34 @@ Pagination envelope: `{ items, returnedCount, offset, hasMore, nextOffset }`.
 
 ## ETW decoding
 
-The native addon (`haril_native.node`) captures ETW events via the Windows Kernel Logger API. The `EventRecordCallback` receives raw event blobs which are decoded using a **manual MOF-offset parser** discovered empirically. This avoids the `TdhGetEventInformation`/`TdhFormatProperty` path which fails with `ERROR_NOT_FOUND` (1168) for kernel MOF events.
+The native addon (`haril_native.node`) consumes the NT Kernel Logger FileIo MOF class (`{90CBDC39-4A3E-11D1-84F4-0000F80464E3}`). `TdhGetEventInformation` fails with `ERROR_NOT_FOUND` (1168) for these events, so the callback parses the documented `FileIo_*` layouts directly (8-byte pointers, x64/arm64):
 
-The layout offsets discovered are:
-- [0..8) = FileObject
-- [8..16) = IrpPtr
-- [16..20) = createOptions
-- [20..24) = createDisposition
-- [24..28) = shareAccess
-- [32..) = FileName (UTF-16 NUL-terminado)
+| Opcode | Event | Layout |
+|---|---|---|
+| 64 | Create | IrpPtr@0 FileObject@8 TTID@16 CreateOptions@20 (disposition in the high byte) FileAttributes@24 ShareAccess@28 OpenPath@32 |
+| 66 | Close | IrpPtr@0 FileObject@8 FileKey@16 |
+| 67 / 68 | Read / Write | Offset@0 IrpPtr@8 FileObject@16 FileKey@24 TTID@32 IoSize@36 |
+| 69 / 70 / 71 | SetInfo / Delete / Rename | IrpPtr@0 FileObject@8 FileKey@16 |
+| 0 / 32 / 36 | Name / FileCreate / FileRundown | FileKey@0 FileName@8 |
 
-The `map_kind()` function maps opcode values to event kinds for both the Manifest provider and MOF Kernel FileIo provider.
+Only Create and the Name family carry a path. The callback keeps `FileObject -> path` (from Create, removed on Close) and `FileKey -> path` (from Name/Rundown, for files opened before the capture) and resolves the other operations through them. Create with `FILE_OPEN`/`FILE_OPEN_IF` is reported as `Open`; real creation is confirmed by USN and the inventories. Timestamps are the event's own QPC stamp. Process names are filled in by `drain()` (`QueryFullProcessImageNameW`, cached per pid).
+
+Paths are translated from `\Device\HarddiskVolumeN` to the DOS drive and scoped to the root. The root is canonicalized (`GetFinalPathNameByHandleW`, also `realpathSync.native` in TS) so every source agrees on one spelling; paths spelled through the 8.3 alias (`C:\Users\FRANCI~1\...`), fully or in mixed form, are rewritten to the canonical root. Kernel buffers are 64–256 × 1 MiB so FileIo bursts do not cause `EventsLost`.
 
 ## Disruptor Lock-Free Ring Buffer (MPSC)
 
-Capture transfers high-throughput events from the Windows kernel to the Bun/TypeScript user space using an **in-memory lock-free Ring Buffer inspired by the LMAX Disruptor** (Multi-Producer Single-Consumer):
-- **Pre-allocated backing memory**: A contiguous 64 MiB buffer (262,144 slots of 256 bytes) allocated via Win32 `VirtualAlloc(PAGE_READWRITE)`.
-- **Concurrent lock-free claiming**: Producers (the high-frequency Kernel ETW callback running in dispatch context and the background NTFS USN journal worker) claim slots atomically using `head_seq_.fetch_add(1)`.
-- **Publication barriers**: Each slot has an aligned atomic sequence flag (`available_[index]`). Producers write their payload and publish `seq + 1` with `std::memory_order_release`.
-- **Zero-lock batch draining**: The consumer (`haril_drain` / `drain()`) reads batches of contiguous published slots up to the available threshold and updates `tail_seq_` with `std::memory_order_release`.
+Capture transfers events from the kernel to the Bun/TypeScript side through an **in-memory lock-free ring buffer inspired by the LMAX Disruptor** (Multi-Producer Single-Consumer):
+- **Pre-allocated backing memory**: 64 MiB (65,536 slots of 1,024 bytes) via `VirtualAlloc(PAGE_READWRITE)`.
+- **Variable-length records**: a record is a head slot plus up to 64 continuation slots, so paths up to the Windows limit (32,767 UTF-16 units) are carried without truncation. Producers claim the whole record with a CAS on `head_seq_`; if it does not fit, nothing is claimed (no unpublished holes that would stall the consumer).
+- **Publication barriers**: each slot has an atomic sequence flag; continuation slots are published before the head.
+- **Batch draining**: `drain()` returns only complete records (head + all continuations published).
 
-This architecture prevents priority inversion, lock contention, and OS thread suspension inside the real-time ETW callback, avoiding kernel buffer overflows (`EventsLost`).
-
+This avoids locks and thread suspension inside the real-time ETW callback.
 ## USN reader
 
-A thread calls `DeviceIoControl(FSCTL_READ_USN_JOURNAL)` in a loop with a 1 MiB buffer. `USN_RECORD_V2` is parsed in place; if a record carries `FileId128` (V4) we extract it too. USN identity fields travel in the slot extension block at offsets [176..204].
+A thread calls `DeviceIoControl(FSCTL_READ_USN_JOURNAL)` in a loop with a 1 MiB buffer, starting at the journal head. Directory records are skipped (directory renames/deletes only invalidate the name cache). Each file record's path is the parent directory's current path (`OpenFileById` + `GetFinalPathNameByHandleW`, cached per parent FRN) plus the name in the record, which keeps the right name for deletes and the old side of renames. The record's identity is the FRN zero-extended to FILE_ID_128 plus the root's volume serial, i.e. the same exact key the inventory reads from `FILE_ID_INFO`. USN identity fields travel in the slot extension block at offsets [176..204].
 
+After the window closes, capture flushes the ring and attaches a file key to every ETW event: the identity last seen for its path (inventory or USN), else the next USN identity for that path (the journal lags behind ETW), else the final inventory, else a path key. Events on the root or on directories are dropped.
 ## Elevation
 
 `IsUserAnAdmin` is implemented via `CheckTokenMembership` against the built-in administrators SID.

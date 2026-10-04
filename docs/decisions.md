@@ -70,16 +70,14 @@ Each merged lane is labelled `[inferred]`. Bridge events use `RelationBasis = In
 
 ## DEC-017 — Native addon: manual MOF-offset parser instead of TDH
 
-**Context:** `TdhGetEventInformation` fails with `ERROR_NOT_FOUND` (1168) for kernel-mode events. The schema-driven TDH path does not carry the observed path as a generic string — it depends on MOF definitions that may not be installed. An empirical survey discovered that the layout of offsets in the ETW callback is consistent across event types.
+**Context:** `TdhGetEventInformation` fails with `ERROR_NOT_FOUND` (1168) for kernel-mode MOF events. An early empirical parser read a FileName at offset 32 for every opcode, which is only valid for `FileIo_Create`; other opcodes produced garbage paths and Read/Write/Close never resolved.
 
-**Decision:** Implement a manual parser of fixed offsets in the ETW consumer callback. The layout offsets are: [0..8)=FileObject, [8..16)=IrpPtr, [16..20)=createOptions, [20..24)=createDisposition, [24..28)=shareAccess, [32..)=FileName (UTF-16 NUL-terminado). The `map_kind()` function maps opcode values to event kinds for both the Manifest provider and the MOF Kernel FileIo provider (Data1=0x90CBDC39).
+**Decision:** Parse the documented `FileIo_*` layouts per opcode (see `docs/design.md`, "ETW decoding"). Create (64) and Name/Rundown (0/32/36) carry paths; Read/Write/SetInfo/Delete/Rename/Close are resolved through `FileObject -> path` and `FileKey -> path` maps kept on the ProcessTrace thread.
 
 **Consequences:**
-- The ETW callback is stable: exit code 0 (previously -1073741819).
-- `map_kind()` handles both providers: Manifest (Data1=0xBCC65049) and MOF Kernel FileIo (Data1=0x90CBDC39).
 - No dependency on Windows MOF schemas that change between updates.
-- The same offset layout carries USN identity fields at slots [176..204].
-
+- Full per-file activity (Create/Open/Read/Write/Rename/Delete/Close) attributed to a pid and process name.
+- 32-bit producer events (4-byte pointers) are ignored.
 ## DEC-019 — `ShellExecuteExW` requires COM init
 
 **Decision:** `ShellExecuteExW(Verb="runas")` is wrapped inside the native addon, which calls `CoInitializeEx` before and `CoUninitialize` after. This satisfies the COM init requirement from MSDN.
@@ -125,7 +123,7 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 **Context:** The capture pipeline receives events from two independent native threads: the kernel ETW callback (`EtwEventCallback`, which runs at dispatch/kernel context and must never be blocked) and the NTFS USN journal polling thread (`usn_thread_entry`). Synchronizing these threads with a conventional mutex caused priority inversion and contention, leading to ETW buffer overruns (`EventsLost`) under heavy file I/O workloads.
 
 **Decision:** Replace the mutex-protected queue with an in-memory Lock-Free Ring Buffer based on the LMAX Disruptor pattern:
-- Pre-allocated 64 MiB buffer (262,144 slots of 256 bytes) via Win32 `VirtualAlloc`.
+- Pre-allocated 64 MiB buffer (65,536 slots of 1,024 bytes) via Win32 `VirtualAlloc`.
 - Atomic sequence claiming using `fetch_add` on `head_seq_`.
 - Slot publication barriers using an atomic sequence array (`available_`) with release semantics.
 - Batched zero-lock consumption in `pop_batch` tracking contiguous published sequences.
@@ -156,11 +154,11 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 ## DEC-030 — USN journal identity rides in the slot extension block
 
-**Context:** The 256-byte slot has 80 reserved bytes. USN records need FRN identity that ETW slots do not carry.
+**Context:** USN records need FRN identity that ETW slots do not carry.
 
 **Decision:** The USN producer writes `fileReferenceNumber`, `parentFileReferenceNumber`, `usn` (u64 each) and `reason` (u32) at slot offsets `[176..204]`. The TS decoder exposes them as `DecodedSlot.usn`. Capture persists them into `usn-events.jsonl`.
 
-**Consequences:** USN records carry enough identity information to track files across renames and moves, within the constraints of the 256-byte slot.
+**Consequences:** USN records carry enough identity information to track files across renames and moves, and their FRN-based `fileId128` matches the inventory identity.
 
 ## DEC-031 — Single QPC clock domain per package
 

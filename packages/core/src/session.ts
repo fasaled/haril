@@ -11,12 +11,13 @@
  * happen by opening a package or by starting capture.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve, win32 } from "node:path";
 
 import { SqliteStore } from "./store/sqlite.ts";
 import { importPackageIntoStore } from "./store/import.ts";
+import { readPackage } from "./package/reader.ts";
 import { FileTimelineCommands } from "./commands/file_timeline.ts";
 import { parseCommand, type ParsedCommand } from "./commands/parse.ts";
 import { runCapture } from "./capture/capture.ts";
@@ -27,6 +28,12 @@ export interface StartCaptureArgs {
   root: string;
   output: string;
   seconds: number;
+}
+
+export interface SessionEvent {
+  type: "capture-started" | "capture-complete" | "capture-error" | "state-changed";
+  message?: string;
+  ok?: boolean;
 }
 
 export interface SessionSnapshot {
@@ -44,12 +51,61 @@ export interface SessionSnapshot {
   sourceStatus: { etw: boolean; usn: boolean; fsw: boolean };
 }
 
+export interface LiveFile {
+  /** Root-relative path, e.g. `\sub\a.txt`. */
+  path: string;
+  eventCount: number;
+  lastKind: string;
+  deleted: boolean;
+}
+
+export interface LiveEvent {
+  seq: number;
+  /** Nanoseconds since capture start (same clock as the package). */
+  offsetNs: bigint;
+  kind: string;
+  source: "etw" | "usn" | "fsw";
+  path: string | null;
+  pid: number | null;
+  process: string | null;
+}
+
+export interface LiveCaptureState {
+  /** Monotonic counter bumped on every change, so the UI can skip re-renders. */
+  version: number;
+  root: string;
+  output: string;
+  seconds: number;
+  startedAt: number;
+  sources: { native: boolean; etw: boolean; usn: boolean; etwRc: number; usnRc: number } | null;
+  counts: { etw: number; usn: number; fsw: number };
+  totalEvents: number;
+  files: LiveFile[];
+  /** Most recent events (bounded tail). */
+  events: LiveEvent[];
+}
+
+export const LIVE_EVENT_TAIL = 2000;
+
 export interface RunOptions {
   captureArgs?: StartCaptureArgs;
   captureInProgress?: boolean;
   outputPackagePath?: string;
 }
 
+/** Default capture package name when --output is omitted: haril-YYYYMMDD-HHMMSS.haril (local time). */
+export function defaultCaptureFileName(now: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const date = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}`;
+  const time = `${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+  return `haril-${date}-${time}.haril`;
+}
+
+/** Case-insensitive `*` / `?` glob over a single name (used by filesystem `ls --pattern`). */
+function globToRegExp(glob: string): RegExp {
+  const src = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${src}$`, "i");
+}
 export class HarilSession {
   private store: SqliteStore;
   private commands: FileTimelineCommands;
@@ -64,6 +120,29 @@ export class HarilSession {
   private _activeFilter: EventFilter | null = null;
   private _history: string[] = [];
   private _queue: { line: string }[] = [];
+  private _activeCapture: {
+    root: string;
+    output: string;
+    seconds: number;
+    startedAt: number;
+    ac: AbortController;
+    promise: Promise<void>;
+  } | null = null;
+  private _listeners: ((ev: SessionEvent) => void)[] = [];
+  private _live: {
+    version: number;
+    root: string;
+    output: string;
+    seconds: number;
+    startedAt: number;
+    startNs: bigint | null;
+    sources: LiveCaptureState["sources"];
+    counts: { etw: number; usn: number; fsw: number };
+    totalEvents: number;
+    files: Map<string, LiveFile>;
+    events: LiveEvent[];
+  } | null = null;
+  private _liveCache: LiveCaptureState | null = null;
 
   constructor(opts: { phase?: Phase; tempDir?: string } = {}) {
     const dir = opts.tempDir ?? mkdtempSync(join(tmpdir(), "haril-"));
@@ -73,7 +152,161 @@ export class HarilSession {
   }
 
   close(): void {
+    if (this._activeCapture) {
+      this._activeCapture.ac.abort();
+      this._activeCapture = null;
+    }
     this.store.close();
+  }
+
+  onEvent(listener: (ev: SessionEvent) => void): () => void {
+    this._listeners.push(listener);
+    return () => {
+      this._listeners = this._listeners.filter((l) => l !== listener);
+    };
+  }
+
+  emitEvent(ev: SessionEvent): void {
+    for (const l of this._listeners) {
+      try {
+        l(ev);
+      } catch {}
+    }
+  }
+
+  get isCapturing(): boolean {
+    return this._activeCapture !== null;
+  }
+
+  get activeCaptureInfo(): { root: string; output: string; seconds: number; startedAt: number } | null {
+    if (!this._activeCapture) return null;
+    return {
+      root: this._activeCapture.root,
+      output: this._activeCapture.output,
+      seconds: this._activeCapture.seconds,
+      startedAt: this._activeCapture.startedAt,
+    };
+  }
+
+  async waitForActiveCapture(): Promise<void> {
+    if (this._activeCapture) {
+      await this._activeCapture.promise;
+    }
+  }
+
+  /** Live view of the running (or last) capture; null when none started. */
+  liveState(): LiveCaptureState | null {
+    const l = this._live;
+    if (!l) return null;
+    if (this._liveCache && this._liveCache.version === l.version) return this._liveCache;
+    this._liveCache = {
+      version: l.version,
+      root: l.root,
+      output: l.output,
+      seconds: l.seconds,
+      startedAt: l.startedAt,
+      sources: l.sources,
+      counts: { ...l.counts },
+      totalEvents: l.totalEvents,
+      files: [...l.files.values()].map((f) => ({ ...f })),
+      events: l.events.slice(),
+    };
+    return this._liveCache;
+  }
+
+  private beginLive(root: string, output: string, seconds: number): void {
+    this._live = {
+      version: 1,
+      root,
+      output,
+      seconds,
+      startedAt: Date.now(),
+      startNs: null,
+      sources: null,
+      counts: { etw: 0, usn: 0, fsw: 0 },
+      totalEvents: 0,
+      files: new Map(),
+      events: [],
+    };
+    this._liveCache = null;
+  }
+
+  private liveRelPath(p: string | null | undefined): string | null {
+    if (!p || !this._live) return null;
+    const root = this._live.root.replace(/[\\/]+$/, "");
+    const norm = p.replace(/\//g, "\\");
+    if (norm.toLowerCase().startsWith(root.toLowerCase() + "\\")) return norm.slice(root.length);
+    return norm.startsWith("\\") ? norm : "\\" + norm;
+  }
+
+  private liveTouchFile(path: string, kind: string, countEvent: boolean): void {
+    const l = this._live!;
+    let f = l.files.get(path.toLowerCase());
+    if (!f) {
+      f = { path, eventCount: 0, lastKind: kind, deleted: false };
+      l.files.set(path.toLowerCase(), f);
+    }
+    if (countEvent) f.eventCount++;
+    f.lastKind = kind;
+    f.deleted = kind === "Delete" || kind === "delete";
+  }
+
+  private livePushEvent(e: Omit<LiveEvent, "seq" | "offsetNs">, ts: bigint): void {
+    const l = this._live!;
+    if (l.startNs === null) l.startNs = ts;
+    const offsetNs = ts >= l.startNs ? ts - l.startNs : 0n;
+    l.totalEvents++;
+    l.counts[e.source]++;
+    l.events.push({ ...e, seq: l.totalEvents, offsetNs });
+    if (l.events.length > LIVE_EVENT_TAIL) l.events.splice(0, l.events.length - LIVE_EVENT_TAIL);
+    if (e.path) this.liveTouchFile(e.path, e.kind, true);
+    l.version++;
+  }
+
+  private liveHooks(): import("./capture/capture.ts").CaptureLiveHooks {
+    return {
+      onSources: (info) => {
+        if (!this._live) return;
+        this._live.sources = info;
+        this._live.version++;
+      },
+      onInventory: (entries) => {
+        if (!this._live) return;
+        if (entries.length > 0 && this._live.startNs === null) this._live.startNs = entries[0]!.observedAt;
+        for (const e of entries) {
+          const rel = this.liveRelPath(e.path);
+          if (!rel || (e.attributes & 0x10) !== 0) continue;
+          if (!this._live.files.has(rel.toLowerCase())) this.liveTouchFile(rel, "existing", false);
+        }
+        this._live.version++;
+      },
+      onEvent: (ev) => {
+        if (!this._live) return;
+        this.livePushEvent(
+          {
+            kind: ev.eventKind,
+            source: ev.source,
+            path: this.liveRelPath(ev.observedPath),
+            pid: ev.pid ?? null,
+            process: ev.processImageName,
+          },
+          BigInt(ev.timestamp_ns),
+        );
+      },
+      onNotification: (n) => {
+        if (!this._live) return;
+        const path = this.liveRelPath(n.path);
+        const old = this.liveRelPath(n.oldPath);
+        if (n.kind === "rename" && old) {
+          const f = this._live.files.get(old.toLowerCase());
+          if (f) f.deleted = true;
+        }
+        this.livePushEvent(
+          { kind: n.kind, source: "fsw", path, pid: n.pid, process: null },
+          BigInt(n.timestamp_ns),
+        );
+      },
+    };
   }
 
   snapshot(): SessionSnapshot {
@@ -108,6 +341,7 @@ export class HarilSession {
     this._packagePath = opts.path;
     this._packageManifest = opts.manifest;
     this._phase = "analyze";
+    this._cwd = "\\";
   }
 
   setPhase(phase: Phase): void {
@@ -116,6 +350,41 @@ export class HarilSession {
 
   setCwd(cwd: string): void {
     this._cwd = cwd;
+  }
+
+  /** Real filesystem path of the package cwd (capture root + relative cwd). */
+  realCwd(): string {
+    const root = this._packageManifest?.root;
+    if (!root) return process.cwd();
+    const rel = this._cwd.replace(/^\\+/, "");
+    return rel ? win32.join(root, rel) : root;
+  }
+
+  /**
+   * Resolves a `cd`/`ls` argument to a root-relative directory (`\`, `\sub`).
+   * Accepts relative paths (`sub`, `..`), root-relative ones (`\sub`) and
+   * absolute paths inside the capture root. Returns null when outside.
+   */
+  resolvePackageDir(target: string): string | null {
+    let t = target.trim().replace(/\//g, "\\");
+    if (/^"(.*)"$/.test(t)) t = t.slice(1, -1);
+    const root = this._packageManifest?.root?.replace(/\\+$/, "");
+    let base = this._cwd;
+    if (/^[A-Za-z]:/.test(t) || t.startsWith("\\\\")) {
+      if (!root) return null;
+      const abs = win32.normalize(t).replace(/\\+$/, "");
+      if (abs.toLowerCase() === root.toLowerCase()) return "\\";
+      if (!abs.toLowerCase().startsWith(root.toLowerCase() + "\\")) return null;
+      t = abs.slice(root.length);
+    }
+    if (t.startsWith("\\")) base = "\\";
+    const parts = base.split("\\").filter(Boolean);
+    for (const seg of t.split("\\")) {
+      if (!seg || seg === ".") continue;
+      if (seg === "..") parts.pop();
+      else parts.push(seg);
+    }
+    return "\\" + parts.join("\\");
   }
 
   setSelectedFileKey(key: FileKey | null): void {
@@ -164,48 +433,123 @@ export class HarilSession {
   // -- Phase dispatch --
 
   private async dispatchEmpty(cmd: ParsedCommand): Promise<CommandResult> {
+    const fsNav = this.dispatchFsNavigation(cmd);
+    if (fsNav) return fsNav;
     if (cmd.name === "open") {
       const path = cmd.positional[0];
       if (!path) return { ok: false, kind: "error", error: "open requires a path" };
-      return { ok: true, kind: "none", data: { action: "open-analyze", path } };
+      try {
+        const pkg = await readPackage(path);
+        const dir = mkdtempSync(join(tmpdir(), "haril-"));
+        const store = new SqliteStore({ path: join(dir, "index.sqlite") });
+        await importPackageIntoStore(path, store);
+        this.setStore(store);
+        this.setPackage({ path, manifest: pkg.manifest });
+        return { ok: true, kind: "none", data: { action: "open-analyze", path } };
+      } catch (err) {
+        return { ok: false, kind: "error", error: `open failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
     }
     if (cmd.name === "start-capture") {
-      const root = cmd.flags["root"];
-      const output = cmd.flags["output"];
-      const seconds = cmd.flags["seconds"];
-      if (!root || typeof root !== "string") {
-        return { ok: false, kind: "error", error: "start-capture requires --root <dir>" };
+      if (this._activeCapture) {
+        return { ok: false, kind: "error", error: "capture already in progress: only one capture can run at a time" };
       }
-      if (!output || typeof output !== "string") {
-        return { ok: false, kind: "error", error: "start-capture requires --output <file.haril>" };
+      const rawRoot = cmd.flags["root"];
+      const rawOutput = cmd.flags["output"];
+      const seconds = cmd.flags["seconds"];
+      if (rawRoot !== undefined && (typeof rawRoot !== "string" || rawRoot === "")) {
+        return { ok: false, kind: "error", error: "start-capture --root requires a directory" };
+      }
+      if (rawOutput !== undefined && (typeof rawOutput !== "string" || rawOutput === "")) {
+        return { ok: false, kind: "error", error: "start-capture --output requires a file path" };
+      }
+      // Relative paths are resolved against the process working directory.
+      const root = resolve(typeof rawRoot === "string" ? rawRoot : ".");
+      const output = resolve(typeof rawOutput === "string" ? rawOutput : defaultCaptureFileName());
+      let rootIsDir = false;
+      try {
+        rootIsDir = statSync(root).isDirectory();
+      } catch {
+        rootIsDir = false;
+      }
+      if (!rootIsDir) {
+        return { ok: false, kind: "error", error: `start-capture: --root is not a directory: ${root}` };
       }
       const secs = seconds === undefined ? 30 : parseInt(String(seconds), 10);
       if (!Number.isFinite(secs) || secs < 1 || secs > 300) {
         return { ok: false, kind: "error", error: "start-capture --seconds must be 1..300" };
       }
-      try {
-        const result = await runCapture({ root, output, seconds: secs });
-        const dir = mkdtempSync(join(tmpdir(), "haril-"));
-        const store = new SqliteStore({ path: join(dir, "index.sqlite") });
-        await importPackageIntoStore(output, store);
-        this.setStore(store);
-        this.setPackage({ path: output, manifest: result.manifest });
-        const s = result.manifest.sources;
-        const lines = [
-          `capture complete: ${output}`,
-          `events=${result.events.length} notifications=${result.notifications.length}`,
-          `etw=${s.etw.available ? `on (observed=${s.etw.eventsObserved} lost=${s.etw.eventsLost})` : `off (rc=${s.etw.startRc ?? "n/a"})`}`,
-          `usn=${s.usn.available ? `on (records=${s.usn.recordsRead})` : `off (rc=${s.usn.startRc ?? "n/a"})`}`,
-          `fsw=on (notifications=${s.fsw.notifications})`,
-        ];
-        if (!s.etw.available || !s.usn.available) {
-          if (!result.nativeAvailable) {
-            lines.push("note: native addon unavailable; kernel sources (ETW/USN) need haril_native.node.");
-          } else {
-            lines.push("note: kernel sources need an elevated terminal; rerun elevated for full capture.");
+
+      const ac = new AbortController();
+      this._phase = "live-capture";
+      this._packagePath = output;
+      this.beginLive(root, output, secs);
+      const live = this.liveHooks();
+
+      const runCaptureFn = async () => {
+        try {
+          const result = await runCapture({ root, output, seconds: secs, signal: ac.signal, live });
+          const dir = mkdtempSync(join(tmpdir(), "haril-"));
+          const store = new SqliteStore({ path: join(dir, "index.sqlite") });
+          await importPackageIntoStore(output, store);
+          this.setStore(store);
+          this.setPackage({ path: output, manifest: result.manifest });
+          this._phase = "analyze";
+          const s = result.manifest.sources;
+          const lines = [
+            `✓ capture complete: ${output}`,
+            `  events=${result.events.length} notifications=${result.notifications.length}`,
+            `  etw=${s.etw.available ? `on (observed=${s.etw.eventsObserved} lost=${s.etw.eventsLost})` : `off (rc=${s.etw.startRc ?? "n/a"})`}`,
+            `  usn=${s.usn.available ? `on (records=${s.usn.recordsRead})` : `off (rc=${s.usn.startRc ?? "n/a"})`}`,
+            `  fsw=on (notifications=${s.fsw.notifications})`,
+          ];
+          if (!s.etw.available || !s.usn.available) {
+            if (!result.nativeAvailable) {
+              lines.push("  note: native addon unavailable; kernel sources (ETW/USN) need haril_native.node.");
+            } else {
+              lines.push("  note: kernel sources need an elevated terminal; rerun elevated for full capture.");
+            }
           }
+          const text = lines.join("\n");
+          this.emitEvent({ type: "capture-complete", message: text, ok: true });
+          return text;
+        } catch (err) {
+          this._phase = "empty";
+          const msg = `start-capture failed: ${err instanceof Error ? err.message : String(err)}`;
+          this.emitEvent({ type: "capture-error", message: msg, ok: false });
+          if (cmd.flags["background"] === true || cmd.flags["bg"] === true) {
+            return msg;
+          }
+          throw err;
+        } finally {
+          this._activeCapture = null;
         }
-        return { ok: true, kind: "text", data: lines.join("\n") };
+      };
+
+      const capturePromise = runCaptureFn();
+      this._activeCapture = {
+        root,
+        output,
+        seconds: secs,
+        startedAt: Date.now(),
+        ac,
+        promise: capturePromise.then(() => {}, () => {}),
+      };
+      this.emitEvent({ type: "capture-started", message: `capture started on ${root}`, ok: true });
+
+      // If caller requested background execution (or TUI):
+      if (cmd.flags["background"] === true || cmd.flags["bg"] === true) {
+        return {
+          ok: true,
+          kind: "text",
+          data: `Capture started in background: ${root} (${secs}s) -> ${output}\nPhase changed to live-capture. UI remains fully active.\nType 'stop-capture' to finish early or 'force-quit-capture' to cancel.`,
+        };
+      }
+
+      // Synchronous wait (default for scripts and unit tests):
+      try {
+        const text = await capturePromise;
+        return { ok: true, kind: "text", data: text };
       } catch (err) {
         return {
           ok: false,
@@ -219,38 +563,131 @@ export class HarilSession {
     return { ok: false, kind: "error", error: `unknown command in Empty phase: ${cmd.name}` };
   }
 
-  private dispatchLiveCapture(cmd: ParsedCommand): CommandResult {
+  private async dispatchLiveCapture(cmd: ParsedCommand): Promise<CommandResult> {
+    const fsNav = this.dispatchFsNavigation(cmd);
+    if (fsNav) return fsNav;
+    if (cmd.name === "start-capture") {
+      return { ok: false, kind: "error", error: "capture already in progress: only one capture can run at a time" };
+    }
     if (cmd.name === "stop-capture") {
-      return { ok: true, kind: "none", data: { action: "stop-capture", packagePath: "" } };
+      if (this._activeCapture) {
+        this._activeCapture.ac.abort();
+        return { ok: true, kind: "text", data: "stopping capture and finalizing package..." };
+      }
+      return { ok: false, kind: "error", error: "no active capture in progress" };
     }
     if (cmd.name === "force-quit-capture") {
-      return { ok: true, kind: "none", data: { action: "force-quit" } };
+      if (this._activeCapture) {
+        this._activeCapture.ac.abort();
+        this._activeCapture = null;
+      }
+      this._phase = "empty";
+      return { ok: true, kind: "text", data: "capture aborted without writing package" };
     }
     return this.dispatchAnalyze(cmd);
   }
 
-  private dispatchAnalyze(cmd: ParsedCommand): CommandResult {
+  /**
+   * `ls`/`cd`/`pwd` outside a package operate on the real filesystem and the
+   * process working directory, which is what relative `--root`/`--output`
+   * paths resolve against. Returns null for other commands.
+   */
+  private dispatchFsNavigation(cmd: ParsedCommand): CommandResult | null {
+    if (cmd.name === "pwd") return { ok: true, kind: "text", data: process.cwd() };
+    if (cmd.name === "cd") {
+      const target = cmd.positional[0] ?? homedir();
+      const next = resolve(target);
+      try {
+        if (!statSync(next).isDirectory()) return { ok: false, kind: "error", error: `cd: not a directory: ${target}` };
+        process.chdir(next);
+      } catch (err) {
+        return { ok: false, kind: "error", error: `cd: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      return { ok: true, kind: "text", data: process.cwd() };
+    }
+    if (cmd.name === "ls") {
+      const dir = resolve(cmd.positional[0] ?? ".");
+      const pattern = typeof cmd.flags["pattern"] === "string" ? globToRegExp(cmd.flags["pattern"]) : null;
+      try {
+        const entries = readdirSync(dir, { withFileTypes: true })
+          .filter((e) => !pattern || pattern.test(e.name))
+          .map((e) => {
+            const isDir = e.isDirectory();
+            let size = "";
+            if (!isDir) {
+              try {
+                size = String(statSync(join(dir, e.name)).size);
+              } catch {
+                size = "?";
+              }
+            }
+            return { name: isDir ? `${e.name}\\` : e.name, isDir, size };
+          })
+          .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
+        if (entries.length === 0) return { ok: true, kind: "text", data: `${dir}\n(empty)` };
+        const width = Math.max(...entries.map((e) => e.size.length), 5);
+        const lines = entries.map((e) => `${(e.isDir ? "<dir>" : e.size).padStart(width)}  ${e.name}`);
+        return { ok: true, kind: "text", data: `${dir}\n${lines.join("\n")}` };
+      } catch (err) {
+        return { ok: false, kind: "error", error: `ls: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
+    return null;
+  }
+
+  private async dispatchAnalyze(cmd: ParsedCommand): Promise<CommandResult> {
     switch (cmd.name) {
-      case "ls":
+      case "start-capture":
+        return {
+          ok: false,
+          kind: "error",
+          error: "cannot start capture while analyzing a package; use 'close' first",
+        };
+      case "open": {
+        const path = cmd.positional[0];
+        if (!path) return { ok: false, kind: "error", error: "open requires a path" };
+        try {
+          const pkg = await readPackage(path);
+          const dir = mkdtempSync(join(tmpdir(), "haril-"));
+          const store = new SqliteStore({ path: join(dir, "index.sqlite") });
+          await importPackageIntoStore(path, store);
+          this.setStore(store);
+          this.setPackage({ path, manifest: pkg.manifest });
+          return { ok: true, kind: "none", data: { action: "open-analyze", path } };
+        } catch (err) {
+          return { ok: false, kind: "error", error: `open failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      case "ls": {
+        const dir = cmd.positional[0] != null ? this.resolvePackageDir(cmd.positional[0]) : this._cwd;
+        if (dir === null) return { ok: false, kind: "error", error: `ls: path is outside the capture root: ${cmd.positional[0]}` };
         return this.commands.browseFileTimelines({
-          directory: cmd.positional[0] ?? this._cwd,
+          directory: dir,
           offset: cmd.flags["offset"] != null ? parseInt(String(cmd.flags["offset"]), 10) : undefined,
           limit: cmd.flags["limit"] != null ? parseInt(String(cmd.flags["limit"]), 10) : undefined,
           pathPattern: typeof cmd.flags["pattern"] === "string" ? cmd.flags["pattern"] : undefined,
           identityKind: this.parseIdentityKind(cmd.flags["identity"]),
         });
+      }
       case "cd": {
-        const target = cmd.positional[0];
-        if (!target) return { ok: false, kind: "error", error: "cd requires a directory" };
-        this._cwd = join(this._cwd, target).replace(/\//g, "\\");
-        return { ok: true, kind: "none" };
+        const target = cmd.positional[0] ?? "\\";
+        const next = this.resolvePackageDir(target);
+        if (next === null) return { ok: false, kind: "error", error: `cd: path is outside the capture root: ${target}` };
+        if (next !== "\\") {
+          const probe = this.commands.browseFileTimelines({ directory: next, limit: 1 });
+          const items = (probe.data as { items?: unknown[] } | undefined)?.items ?? [];
+          if (items.length === 0) return { ok: false, kind: "error", error: `cd: no observed files under ${next}` };
+        }
+        this._cwd = next;
+        return { ok: true, kind: "json", data: { action: "cd", cwd: this._cwd, path: this.realCwd() } };
       }
       case "pwd":
-        return { ok: true, kind: "json", data: { cwd: this._cwd } };
+        return { ok: true, kind: "json", data: { cwd: this._cwd, path: this.realCwd() } };
       case "close":
         this._phase = "empty";
         this._packagePath = undefined;
         this._packageManifest = undefined;
+        this._cwd = "\\";
         return { ok: true, kind: "none", data: { action: "close" } };
       case "events": {
         const target = this.resolveTarget(cmd.positional[0]);
@@ -329,7 +766,13 @@ export class HarilSession {
       case "queue":
         return { ok: true, kind: "json", data: { items: this._queue } };
       case "cancel":
-        return { ok: true, kind: "none", data: { cancelled: true } };
+        if (this._activeCapture) {
+          this._activeCapture.ac.abort();
+          this._activeCapture = null;
+          this._phase = "empty";
+          return { ok: true, kind: "text", data: "Active capture cancelled." };
+        }
+        return { ok: true, kind: "text", data: "No active operation to cancel." };
       case "help":
         return this.helpResult();
       case "quit":
@@ -364,8 +807,8 @@ export class HarilSession {
       ok: true,
       kind: "text",
       data: [
-        "ls [path] [--pattern <glob>] [--identity exact|path-scoped]",
-        "cd <dir>",
+        "ls [path] [--pattern <glob>] [--identity exact|path-scoped]   (filesystem outside Analyze)",
+        "cd <dir>                    (filesystem outside Analyze)",
         "pwd",
         "open <path.haril>           (Empty phase)",
         "close                       (Analyze phase)",
@@ -379,7 +822,7 @@ export class HarilSession {
         "capture",
         "heuristics [on|off]",
         "zoom [in|out|reset]",
-        "start-capture [--root <dir>] [--output <file.haril>] [--seconds <n>]   (Empty phase)",
+        "start-capture [--root <dir>] [--output <file.haril>] [--seconds <n>]   (Empty phase; defaults: root = cwd, output = haril-YYYYMMDD-HHMMSS.haril)",
         "stop-capture                (Live Capture phase)",
         "force-quit-capture          (Live Capture phase)",
         "queue",

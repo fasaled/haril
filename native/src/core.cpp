@@ -44,8 +44,12 @@
 
 namespace {
 
-constexpr std::size_t kRingCapacity = 262144;  // 256k slots
+constexpr std::size_t kRingCapacity = 65536;  // 64k slots x 1 KiB = 64 MiB
 constexpr std::size_t kRingBytes   = kRingCapacity * HARIL_SLOT_SIZE;
+// Longest path a record can carry (UNICODE_STRING limit) and the number
+// of UTF-16 units per continuation slot.
+constexpr std::size_t kMaxRecordPathChars = 32767;
+constexpr std::size_t kContChars = HARIL_SLOT_SIZE / 2;
 
 struct alignas(64) PaddedAtomic {
     std::atomic<std::uint64_t> v{0};
@@ -79,46 +83,79 @@ public:
     RingBuffer(const RingBuffer&) = delete;
     RingBuffer& operator=(const RingBuffer&) = delete;
 
-    bool push(std::span<const std::uint8_t> data) noexcept {
-        if (data.size() > HARIL_SLOT_SIZE) return false;
+    // Push one logical record: `header` is a full public-layout slot
+    // (path fields are filled here). Paths longer than the inline area
+    // spill into continuation slots of raw UTF-16. The whole record is
+    // claimed atomically with a CAS so a full ring never leaves an
+    // unpublished hole behind (which would stall the consumer).
+    bool push_record(const std::uint8_t* header, const wchar_t* path, std::size_t pathLen) noexcept {
+        if (pathLen > kMaxRecordPathChars) pathLen = kMaxRecordPathChars;
+        const std::size_t inlineChars = std::min<std::size_t>(pathLen, HARIL_SLOT_PATH_CHARS);
+        const std::size_t rest = pathLen - inlineChars;
+        const std::size_t extra = (rest + kContChars - 1) / kContChars;
+        const std::uint64_t k = 1 + extra;
 
-        // Atomically claim a sequence ticket (Disruptor claim phase)
-        const std::uint64_t seq = head_seq_.v.fetch_add(1, std::memory_order_relaxed);
-        const std::uint64_t t = tail_seq_.v.load(std::memory_order_acquire);
+        std::uint64_t seq = head_seq_.v.load(std::memory_order_relaxed);
+        for (;;) {
+            const std::uint64_t t = tail_seq_.v.load(std::memory_order_acquire);
+            if (seq + k - t > kRingCapacity) return false;  // backpressure: drop whole record
+            if (head_seq_.v.compare_exchange_weak(seq, seq + k,
+                    std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                break;
+            }
+        }
 
-        // Check if buffer is full (backpressure)
-        if (seq - t >= kRingCapacity) {
-            return false;
+        // Continuation slots first; the head slot is published last.
+        for (std::uint64_t j = 1; j < k; j++) {
+            const std::size_t index = (seq + j) % kRingCapacity;
+            std::uint8_t* dst = storage_ + index * HARIL_SLOT_SIZE;
+            const std::size_t off = inlineChars + (j - 1) * kContChars;
+            const std::size_t n = std::min<std::size_t>(kContChars, pathLen - off);
+            std::memcpy(dst, path + off, n * sizeof(wchar_t));
+            if (n < kContChars) std::memset(dst + n * 2, 0, HARIL_SLOT_SIZE - n * 2);
+            available_[index].store(seq + j + 1, std::memory_order_release);
         }
 
         const std::size_t index = seq % kRingCapacity;
         std::uint8_t* dst = storage_ + index * HARIL_SLOT_SIZE;
-        std::memcpy(dst, data.data(), data.size());
-        if (data.size() < HARIL_SLOT_SIZE) {
-            std::memset(dst + data.size(), 0, HARIL_SLOT_SIZE - data.size());
-        }
-
-        // Publish publication marker: seq + 1 (1-based to distinguish from 0 initial state)
+        std::memcpy(dst, header, HARIL_SLOT_SIZE);
+        std::memset(dst + HARIL_SLOT_PATH_OFFSET, 0, HARIL_SLOT_PATH_CHARS * 2);
+        std::memcpy(dst + HARIL_SLOT_PATH_OFFSET, path, inlineChars * sizeof(wchar_t));
+        *reinterpret_cast<std::uint16_t*>(dst + 76) = static_cast<std::uint16_t>(pathLen);
+        *reinterpret_cast<std::uint16_t*>(dst + 80) = static_cast<std::uint16_t>(extra);
         available_[index].store(seq + 1, std::memory_order_release);
         return true;
     }
 
+    // Pop whole records only: a record is taken when its head and all of
+    // its continuation slots are published and fit in `out`.
     int pop_batch(std::span<std::uint8_t> out, std::uint64_t* out_seq) noexcept {
         const std::uint64_t t = tail_seq_.v.load(std::memory_order_relaxed);
         const int max_slots = static_cast<int>(out.size() / HARIL_SLOT_SIZE);
         int n = 0;
 
-        // Collect contiguous published slots
         while (n < max_slots) {
             const std::uint64_t seq = t + n;
             const std::size_t index = seq % kRingCapacity;
-            // A slot is published if its available_ marker matches seq + 1
-            if (available_[index].load(std::memory_order_acquire) != seq + 1) {
-                break;
+            if (available_[index].load(std::memory_order_acquire) != seq + 1) break;
+            const std::uint8_t* head = storage_ + index * HARIL_SLOT_SIZE;
+            const int k = 1 + *reinterpret_cast<const std::uint16_t*>(head + 80);
+            if (n + k > max_slots) break;
+            bool complete = true;
+            for (int j = 1; j < k; j++) {
+                const std::size_t ji = (seq + j) % kRingCapacity;
+                if (available_[ji].load(std::memory_order_acquire) != seq + j + 1) {
+                    complete = false;
+                    break;
+                }
             }
-            const std::uint8_t* src = storage_ + index * HARIL_SLOT_SIZE;
-            std::memcpy(out.data() + static_cast<std::size_t>(n) * HARIL_SLOT_SIZE, src, HARIL_SLOT_SIZE);
-            n++;
+            if (!complete) break;
+            for (int j = 0; j < k; j++) {
+                const std::size_t ji = (seq + j) % kRingCapacity;
+                std::memcpy(out.data() + static_cast<std::size_t>(n + j) * HARIL_SLOT_SIZE,
+                            storage_ + ji * HARIL_SLOT_SIZE, HARIL_SLOT_SIZE);
+            }
+            n += k;
         }
 
         if (n > 0) {
@@ -127,7 +164,6 @@ public:
         }
         return n;
     }
-
     // Debug accessors
     std::uint64_t head() const noexcept { return head_seq_.v.load(std::memory_order_relaxed); }
     std::uint64_t tail() const noexcept { return tail_seq_.v.load(std::memory_order_relaxed); }
@@ -153,169 +189,40 @@ inline UniqueHandle make_unique(HANDLE h) noexcept {
     return UniqueHandle(h == INVALID_HANDLE_VALUE ? nullptr : h);
 }
 
-// ----------------------- Raw slot for ETW callback (minimal stack) -----------------------
+// ----------------------- Slot encoding -----------------------
 //
-// The ETW callback must be fast and avoid heap allocations, complex loops,
-// or function calls. We store a raw record and decode it later during drain.
-// Layout (little-endian):
-//   [0..2)   source      u16
-//   [2..4)   kind        u16
-//   [4..12)  ts_ns       u64
-//   [12..16) pid         u32
-//   [16..20) tid         u32
-//   [20..28) irpPtr      u64
-//   [28..32) ntStatus    u32
-//   [32..48) fileId      16 bytes
-//   [48..52) vsn         u32
-//   [52..56) byteOffset  u32
-//   [56..60) byteLen     u32
-//   [60..64) shareAccess u32
-//   [64..68) createOpts  u32
-//   [68..72) createDisp  u32
-//   [72..76) sourceIdx   u32
-//   [76..78) pathLen     u16 (UTF-16 code units, max 48)
-//   [78..174) pathUTF16   96 bytes (48 UTF-16 chars)
-//   [174..270) procUTF16  96 bytes (48 UTF-16 chars)
-//
-// Total: must fit in 256.
-constexpr std::size_t HARIL_RAW_SLOT_SIZE = 256;
+// Public slot layout (little-endian), shared by ETW and USN producers;
+// see packages/core/src/ffi/ring_consumer.ts for the consumer side:
+//   [0..76)    fixed header (source, kind, ts, pid, tid, irp, status,
+//              fileId128, vsn, byteOffset, byteLen, share, createOpts,
+//              createDisp, sourceIdx)
+//   [76..78)   pathLen   u16  total UTF-16 units of the observed path
+//   [78..80)   procLen   u16  UTF-16 units of the process image name
+//   [80..82)   extra     u16  continuation slots following this one
+//   [112..176) process image name (UTF-16, HARIL_SLOT_PROC_CHARS)
+//   [176..204) USN extension (USN slots only)
+//   [256..1024) first HARIL_SLOT_PATH_CHARS units of the path
+// Continuation slots carry the rest of the path as raw UTF-16
+// (HARIL_SLOT_SIZE / 2 units each).
 
-#pragma pack(push, 1)
-struct RawEtwSlot {
-    std::uint16_t source;
-    std::uint16_t kind;
-    std::uint64_t ts_ns;
-    std::uint32_t pid;
-    std::uint32_t tid;
-    std::uint64_t irp;
-    std::uint32_t ntStatus;
-    std::uint8_t  fileId[16];
-    std::uint32_t vsn;
-    std::uint32_t byteOffset;
-    std::uint32_t byteLen;
-    std::uint32_t shareAccess;
-    std::uint32_t createOpts;
-    std::uint32_t createDisp;
-    std::uint32_t sourceIdx;
-    std::uint16_t pathLen;      // UTF-16 code units
-    wchar_t       path[32];     // UTF-16
-    wchar_t       proc[32];     // UTF-16
-};
-#pragma pack(pop)
-static_assert(sizeof(RawEtwSlot) <= HARIL_RAW_SLOT_SIZE, "RawEtwSlot too large");
-
-// Encode a raw slot in the callback (fast, no function calls, no loops over string).
-// The path is copied with a simple bounded memcpy.
-inline void encode_raw_slot(RawEtwSlot* s,
-                            std::uint16_t source, std::uint16_t kind, std::uint64_t ts_ns,
-                            std::uint32_t pid, std::uint32_t tid, std::uint64_t irp, std::uint32_t ntStatus,
-                            const std::uint8_t fileId[16], std::uint32_t vsn,
-                            std::uint32_t byteOffset, std::uint32_t byteLen,
-                            std::uint32_t shareAccess, std::uint32_t createOpts, std::uint32_t createDisp,
-                            std::uint32_t sourceIdx,
-                            const wchar_t* path, std::size_t pathLen,
-                            const wchar_t* proc, std::size_t procLen) noexcept {
-    s->source = source;
-    s->kind = kind;
-    s->ts_ns = ts_ns;
-    s->pid = pid;
-    s->tid = tid;
-    s->irp = irp;
-    s->ntStatus = ntStatus;
-    if (fileId) std::memcpy(s->fileId, fileId, 16);
-    s->vsn = vsn;
-    s->byteOffset = byteOffset;
-    s->byteLen = byteLen;
-    s->shareAccess = shareAccess;
-    s->createOpts = createOpts;
-    s->createDisp = createDisp;
-    s->sourceIdx = sourceIdx;
-    s->pathLen = static_cast<std::uint16_t>(std::min<std::size_t>(pathLen, 32));
-    std::memcpy(s->path, path, s->pathLen * sizeof(wchar_t));
-    // Zero the rest of path
-    if (s->pathLen < 32) std::memset(s->path + s->pathLen, 0, (32 - s->pathLen) * sizeof(wchar_t));
-    std::memcpy(s->proc, proc, std::min<std::size_t>(procLen, 32) * sizeof(wchar_t));
-    if (procLen < 32) std::memset(s->proc + procLen, 0, (32 - procLen) * sizeof(wchar_t));
+// Write a UTF-16 string into the slot at `offset`, bounded by
+// `max_chars`, and store its length (u16) at `len_offset`.
+inline void put_slot_string(std::uint8_t* p, std::size_t offset, std::size_t max_chars,
+                            std::size_t len_offset, const wchar_t* s, std::size_t n) noexcept {
+    if (n > max_chars) n = max_chars;
+    std::memset(p + offset, 0, max_chars * 2);
+    std::memcpy(p + offset, s, n * sizeof(wchar_t));
+    *reinterpret_cast<std::uint16_t*>(p + len_offset) = static_cast<std::uint16_t>(n);
 }
-
-// Decode a raw slot to the full HARIL_SLOT_SIZE format during drain.
-void decode_raw_slot(const RawEtwSlot* raw, std::span<std::uint8_t, HARIL_SLOT_SIZE> out) noexcept {
-    std::memset(out.data(), 0, HARIL_SLOT_SIZE);
-    std::uint8_t* p = out.data();
-    *reinterpret_cast<std::uint16_t*>(p + 0)   = raw->source;
-    *reinterpret_cast<std::uint16_t*>(p + 2)   = raw->kind;
-    *reinterpret_cast<std::uint64_t*>(p + 4)   = raw->ts_ns;
-    *reinterpret_cast<std::uint32_t*>(p + 12)  = raw->pid;
-    *reinterpret_cast<std::uint32_t*>(p + 16)  = raw->tid;
-    *reinterpret_cast<std::uint64_t*>(p + 20)  = raw->irp;
-    *reinterpret_cast<std::uint32_t*>(p + 28)  = raw->ntStatus;
-    std::memcpy(p + 32, raw->fileId, 16);
-    *reinterpret_cast<std::uint32_t*>(p + 48)  = raw->vsn;
-    *reinterpret_cast<std::uint32_t*>(p + 52)  = raw->byteOffset;
-    *reinterpret_cast<std::uint32_t*>(p + 56)  = raw->byteLen;
-    *reinterpret_cast<std::uint32_t*>(p + 60)  = raw->shareAccess;
-    *reinterpret_cast<std::uint32_t*>(p + 64)  = raw->createOpts;
-    *reinterpret_cast<std::uint32_t*>(p + 68)  = raw->createDisp;
-    *reinterpret_cast<std::uint32_t*>(p + 72)  = raw->sourceIdx;
-    p[76] = static_cast<std::uint8_t>(raw->pathLen);
-    // Inline put_utf16 for path
-    {
-        const int max_chars = 32 / 2 - 1; // 15
-        const int n = std::min<int>(raw->pathLen, max_chars);
-        for (int i = 0; i < n; i++) {
-            const std::uint16_t c = static_cast<std::uint16_t>(raw->path[i]);
-            p[80 + i * 2]     = static_cast<std::uint8_t>(c & 0xFF);
-            p[80 + i * 2 + 1] = static_cast<std::uint8_t>(c >> 8);
-        }
-        if (n < max_chars) {
-            p[80 + n * 2]     = 0;
-            p[80 + n * 2 + 1] = 0;
-        }
-    }
-    // Inline put_utf16 for proc
-    {
-        const int max_chars = 64 / 2 - 1; // 31
-        // Find actual proc length (bounded by 32)
-        int proc_len = 0;
-        while (proc_len < 32 && raw->proc[proc_len] != L'\0') proc_len++;
-        const int n = std::min<int>(proc_len, max_chars);
-        for (int i = 0; i < n; i++) {
-            const std::uint16_t c = static_cast<std::uint16_t>(raw->proc[i]);
-            p[112 + i * 2]     = static_cast<std::uint8_t>(c & 0xFF);
-            p[112 + i * 2 + 1] = static_cast<std::uint8_t>(c >> 8);
-        }
-        if (n < max_chars) {
-            p[112 + n * 2]     = 0;
-            p[112 + n * 2 + 1] = 0;
-        }
-    }
-}
-
 // USN extension block, written into the slot's reserved area by the USN
 // producer thread only. Layout (little-endian):
 //   [176..184] fileReferenceNumber       u64
 //   [184..192] parentFileReferenceNumber u64
 //   [192..200] usn                       u64
 //   [200..204] reason                    u32
-// [204..256] still reserved.
+// [204..256) still reserved.
 
 // Slot encoding for non-callback paths (USN, inventory, etc.)
-inline void put_utf16(std::uint8_t* dst, int dst_bytes, std::wstring_view s) noexcept {
-    const int max_chars = dst_bytes / 2 - 1;
-    const int n = (max_chars <= 0)
-        ? 0
-        : static_cast<int>(std::min<std::size_t>(s.size(), static_cast<std::size_t>(max_chars)));
-    for (int i = 0; i < n; i++) {
-        const std::uint16_t c = static_cast<std::uint16_t>(s[i]);
-        dst[i * 2]     = static_cast<std::uint8_t>(c & 0xFF);
-        dst[i * 2 + 1] = static_cast<std::uint8_t>(c >> 8);
-    }
-    if (n < max_chars) {
-        dst[n * 2]     = 0;
-        dst[n * 2 + 1] = 0;
-    }
-}
-
 inline void encode_event_slot(std::span<std::uint8_t, HARIL_SLOT_SIZE> s,
                        std::uint16_t source, std::uint16_t kind, std::uint64_t ts_ns,
                        std::uint32_t pid, std::uint32_t tid, std::uint64_t irp, std::uint32_t ntStatus,
@@ -323,7 +230,7 @@ inline void encode_event_slot(std::span<std::uint8_t, HARIL_SLOT_SIZE> s,
                        std::uint32_t byteOffset, std::uint32_t byteLen,
                        std::uint32_t shareAccess, std::uint32_t createOpts, std::uint32_t createDisp,
                        std::uint32_t sourceIdx,
-                       std::wstring_view path, std::wstring_view proc) noexcept {
+                       std::wstring_view proc) noexcept {
     std::memset(s.data(), 0, HARIL_SLOT_SIZE);
     std::uint8_t* p = s.data();
     *reinterpret_cast<std::uint16_t*>(p + 0)   = source;
@@ -341,9 +248,7 @@ inline void encode_event_slot(std::span<std::uint8_t, HARIL_SLOT_SIZE> s,
     *reinterpret_cast<std::uint32_t*>(p + 64)  = createOpts;
     *reinterpret_cast<std::uint32_t*>(p + 68)  = createDisp;
     *reinterpret_cast<std::uint32_t*>(p + 72)  = sourceIdx;
-    p[76] = static_cast<std::uint8_t>(std::min<std::size_t>(path.size(), 64));
-    put_utf16(p + 80, 32, path);
-    put_utf16(p + 112, 64, proc);
+    put_slot_string(p, HARIL_SLOT_PROC_OFFSET, HARIL_SLOT_PROC_CHARS, 78, proc.data(), proc.size());
 }
 
 void encode_usn_extension(std::span<std::uint8_t, HARIL_SLOT_SIZE> s,
@@ -364,52 +269,89 @@ std::uint64_t qpc_to_ns(LARGE_INTEGER qpc, LARGE_INTEGER freq) noexcept {
 
 constexpr std::uint16_t kKindCreate = 1;
 constexpr std::uint16_t kKindOpen   = 2;
+constexpr std::uint16_t kKindRead   = 3;
 constexpr std::uint16_t kKindSetInfo= 4;
 constexpr std::uint16_t kKindWrite  = 5;
 constexpr std::uint16_t kKindClose  = 6;
+constexpr std::uint16_t kKindRename = 7;
+constexpr std::uint16_t kKindDelete = 8;
 constexpr std::uint16_t kKindOpEnd  = 9;
 constexpr std::uint16_t kKindNotify = 10;
 
 // ----------------------- ETW constants -----------------------
 
-constexpr GUID Microsoft_Windows_Kernel_File_GUID =
-    { 0xBCC65049, 0x262F, 0x4E83, { 0xAB, 0x1E, 0x2D, 0xA0, 0x4F, 0xEA, 0x59, 0x95 } };
-// MOF-based Kernel FileIo provider (used by NT Kernel Logger).
-// GUID: {90CB6C39-5F2F-4E83-AB1E-2DA04FEA5995}
+// Kernel FileIo MOF class (NT Kernel Logger): {90CBDC39-4A3E-11D1-84F4-0000F80464E3}.
 constexpr GUID Microsoft_Windows_Kernel_File_MOF_GUID =
-    { 0x90CB6C39, 0x5F2F, 0x4E83, { 0xAB, 0x1E, 0x2D, 0xA0, 0x4F, 0xEA, 0x59, 0x95 } };
-constexpr GUID Microsoft_Windows_Kernel_Process_GUID =
-    { 0x22FB2CD6, 0x0E7B, 0x422B, { 0xA0, 0xC7, 0x2F, 0xAD, 0x11, 0xA0, 0xB2, 0xCA } };
+    { 0x90CBDC39, 0x4A3E, 0x11D1, { 0x84, 0xF4, 0x00, 0x00, 0xF8, 0x04, 0x64, 0xE3 } };
 
 // SystemTraceControlGuid is exported by Advapi32.lib but its header
 // definition is conditional on INITGUID.
 constexpr GUID SystemTraceControlGuidLocal =
     { 0x9E814AAD, 0x3204, 0x11D2, { 0x9A, 0x82, 0x00, 0x60, 0x08, 0xA8, 0x69, 0x39 } };
 
-// Map a Kernel FileIo MOF event (id=0, ver=3) to a Haril kind by opcode.
-// TDH cannot decode these MOF events (rc=1168), so we use the empirical
-// field layout discovered via survey4:
-//   op=64 Create, op=72 Read, op=74 Write, op=80 SetInfo/Rename,
-//   op=65/66 Close/Cleanup, op=76 OpEnd.
-std::uint16_t map_kind(std::uint16_t opcode, const GUID& provider) noexcept {
-    const bool isFileIo = (provider == Microsoft_Windows_Kernel_File_GUID) ||
-                           (provider == Microsoft_Windows_Kernel_File_MOF_GUID) ||
-                           (provider.Data1 == 0x90CBDC39);  // MOF Kernel FileIo (surveyed)
-    if (isFileIo) {
-        switch (opcode) {
-            case 64: return kKindCreate;
-            case 72: return kKindOpen;    // Read
-            case 74: return kKindWrite;
-            case 80: return kKindSetInfo; // Rename/SetInfo
-            case 65: case 66: return kKindClose;
-            case 76: return kKindOpEnd;
-            default: return 0;
-        }
+// Strip the Win32 namespace prefix: L"\\\\?\\C:\\x" -> L"C:\\x",
+// L"\\\\?\\UNC\\srv\\share" -> L"\\\\srv\\share".
+std::wstring strip_long_prefix(std::wstring_view p) {
+    if (p.size() >= 8 && p.substr(0, 8) == L"\\\\?\\UNC\\") return L"\\" + std::wstring(p.substr(7));
+    if (p.size() >= 4 && (p.substr(0, 4) == L"\\\\?\\" || p.substr(0, 4) == L"\\??\\")) return std::wstring(p.substr(4));
+    return std::wstring(p);
+}
+
+// Win32 form usable beyond MAX_PATH regardless of the process manifest.
+std::wstring to_long_path(std::wstring_view p) {
+    if (p.size() >= 4 && (p.substr(0, 4) == L"\\\\?\\" || p.substr(0, 4) == L"\\\\.\\")) return std::wstring(p);
+    if (p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\') return L"\\\\?\\UNC\\" + std::wstring(p.substr(2));
+    if (p.size() >= 3 && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) {
+        std::wstring out = L"\\\\?\\" + std::wstring(p);
+        std::replace(out.begin(), out.end(), L'/', L'\\');
+        return out;
     }
-    if (provider == Microsoft_Windows_Kernel_Process_GUID) {
-        if (opcode == 1) return kKindCreate;
+    return std::wstring(p);
+}
+
+// Lowercase, '\'-separated, without trailing backslash (so "C:\" -> "c:").
+std::wstring lower_root_for_cmp(std::wstring_view s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (wchar_t c : s) {
+        const wchar_t x = c == L'/' ? L'\\' : static_cast<wchar_t>(towlower(c));
+        if (x == L'\\' && !out.empty() && out.back() == L'\\') continue;
+        out.push_back(x);
     }
-    return 0;
+    while (!out.empty() && out.back() == L'\\') out.pop_back();
+    return out;
+}
+
+// Final (long-name, symlink-resolved) DOS path of an existing directory,
+// e.g. "C:\Users\FRANCI~1\x" -> "C:\Users\francisco\x". Falls back to the
+// input without its \\?\ prefix when the directory cannot be opened.
+std::wstring canonical_dir_path(std::wstring_view p) {
+    std::wstring fallback = strip_long_prefix(p);
+    std::replace(fallback.begin(), fallback.end(), L'/', L'\\');
+    HANDLE h = CreateFileW(to_long_path(fallback).c_str(), 0,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return fallback;
+    std::vector<wchar_t> buf(512);
+    DWORD len = GetFinalPathNameByHandleW(h, buf.data(), static_cast<DWORD>(buf.size()), VOLUME_NAME_DOS);
+    if (len >= buf.size()) {
+        buf.resize(static_cast<std::size_t>(len) + 1);
+        len = GetFinalPathNameByHandleW(h, buf.data(), static_cast<DWORD>(buf.size()), VOLUME_NAME_DOS);
+    }
+    CloseHandle(h);
+    if (len == 0 || len >= buf.size()) return fallback;
+    return strip_long_prefix(std::wstring_view(buf.data(), len));
+}
+
+// 8.3 short form of a path ("" when unavailable).
+std::wstring short_path_alias(const std::wstring& p) {
+    const std::wstring lp = to_long_path(p);
+    const DWORD need = GetShortPathNameW(lp.c_str(), nullptr, 0);
+    if (need == 0) return {};
+    std::vector<wchar_t> buf(need);
+    const DWORD len = GetShortPathNameW(lp.c_str(), buf.data(), need);
+    if (len == 0 || len >= need) return {};
+    return strip_long_prefix(std::wstring_view(buf.data(), len));
 }
 
 std::wstring normalize_path_for_cmp(std::wstring_view s) {
@@ -486,7 +428,7 @@ struct InventoryEmitRecord {
 void walk_dir_recursive(std::wstring_view root, std::vector<InventoryEmitRecord>& out) {
     WIN32_FIND_DATAW fd{};
     const std::wstring pattern = std::wstring(root) + L"\\*";
-    const UniqueHandle h(make_unique(FindFirstFileW(pattern.c_str(), &fd)));
+    const UniqueHandle h(make_unique(FindFirstFileW(to_long_path(pattern).c_str(), &fd)));
     if (!h) return;
 
     do {
@@ -498,7 +440,7 @@ void walk_dir_recursive(std::wstring_view root, std::vector<InventoryEmitRecord>
         }
 
         const UniqueHandle hf(make_unique(CreateFileW(
-            full.c_str(), 0,
+            to_long_path(full).c_str(), 0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr)));
         FILE_ID_INFO id{};
@@ -535,7 +477,7 @@ void walk_dir_recursive(std::wstring_view root, std::vector<InventoryEmitRecord>
 void walk_dir_rows(std::wstring_view root, std::vector<InventoryRow>& out) {
     WIN32_FIND_DATAW fd{};
     const std::wstring pattern = std::wstring(root) + L"\\*";
-    const UniqueHandle h(make_unique(FindFirstFileW(pattern.c_str(), &fd)));
+    const UniqueHandle h(make_unique(FindFirstFileW(to_long_path(pattern).c_str(), &fd)));
     if (!h) return;
 
     do {
@@ -547,7 +489,7 @@ void walk_dir_rows(std::wstring_view root, std::vector<InventoryRow>& out) {
         }
 
         const UniqueHandle hf(make_unique(CreateFileW(
-            full.c_str(), 0,
+            to_long_path(full).c_str(), 0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr)));
         FILE_ID_INFO id{};
@@ -599,9 +541,22 @@ struct HarilContext::Impl {
     bool etwOwnsSession = false;  // only stop sessions we started
     std::wstring etwSessionName;
     std::wstring etwTargetRoot;
-    // Fixed buffer for target root (lowercase, no trailing backslash) for callback use.
-    wchar_t etwTargetRootFixed[512];
-    std::size_t etwTargetRootFixedLen = 0;
+    // Scope roots for the callback: lowercase, '\' separators, no trailing
+    // backslash. The alias is the 8.3 short form of the canonical root
+    // (empty when identical); matches on it are rewritten to the
+    // canonical root so every emitted path shares one prefix.
+    std::wstring etwRootLower;
+    std::wstring etwRootAliasLower;
+    // In-scope paths by FileObject (from Create) and by FileKey (from the
+    // Name/Rundown events). Touched only on the ProcessTrace thread.
+    static constexpr std::size_t kMaxTrackedHandles = 1u << 20;
+    std::unordered_map<std::uint64_t, std::wstring> etwObjPaths;
+    std::unordered_map<std::uint64_t, std::wstring> etwKeyPaths;
+    // Directory spelled with 8.3 components -> long form ("" if unknown).
+    std::unordered_map<std::wstring, std::wstring> etwLongDirCache;
+    // Scratch buffer for the translated path. ProcessTrace delivers events
+    // on a single thread, so the callback can reuse it without locking.
+    wchar_t etwPathScratch[kMaxRecordPathChars + 1];
     // NT device prefix (L"\\Device\\HarddiskVolumeN") -> drive ("C:").
     // Built once at etw_start; volumes rarely change mid-capture.
     // Fixed arrays for callback use (no heap allocation).
@@ -627,6 +582,9 @@ struct HarilContext::Impl {
     std::atomic<std::uint64_t> usnDroppedUnresolved{0};
     std::jthread etwThread;
 
+    // pid -> process image base name, filled by drain() (consumer thread).
+    std::unordered_map<std::uint32_t, std::wstring> procNameCache;
+
     // USN
     std::wstring usnVolume;
     std::wstring usnTargetRoot;  // scope filter; empty = no filtering
@@ -634,6 +592,8 @@ struct HarilContext::Impl {
     USN_JOURNAL_DATA usnJournal{};
     std::uint64_t usnCursor = 0;  // next USN to read; set at start
     std::atomic<std::uint64_t> usnRecordsRead{0};
+    std::uint32_t usnVolumeSerial = 0;
+    std::unordered_map<std::uint64_t, std::wstring> usnDirCache;
     std::jthread usnThread;
 
     // TDH schema cache
@@ -680,204 +640,260 @@ struct HarilContext::Impl {
         return std::span<const std::uint8_t>(it->second);
     }
 
-    // ETW EventCallback — manual MOF parser for Kernel FileIo events.
-    //
-    // TdhGetEventInformation returns ERROR_NOT_FOUND (1168) for kernel MOF
-    // events, so we decode the fixed-offset layout empirically discovered
-    // via survey4 (provider 90cbdc39, id=0, ver=3):
-    //   [0..8)   FileObject (u64)
-    //   [8..16)  IrpPtr (u64)
-    //   [16..20) createOptions (u32)  — Create only
-    //   [20..24) createDisposition (u32) — Create only
-    //   [24..28) shareAccess (u32)    — Create only
-    //   [28..32) padding
-    //   [32..]   FileName (UTF-16, NUL-terminated)
-    //
-    // Events without a path (Close/Cleanup/OpEnd) are dropped.
-    // ETW EventCallback — manual MOF parser for Kernel FileIo events.
-//
-// TdhGetEventInformation returns ERROR_NOT_FOUND (1168) for kernel MOF
-// events, so we decode the fixed-offset layout empirically discovered
-// via survey4 (provider 90cbdc39, id=0, ver=3):
-//   [0..8)   FileObject (u64)
-//   [8..16)  IrpPtr (u64)
-//   [16..20) createOptions (u32)  — Create only
-//   [20..24) createDisposition (u32) — Create only
-//   [24..28) shareAccess (u32)    — Create only
-//   [28..32) padding
-//   [32..]   FileName (UTF-16, NUL-terminated)
-//
-// Events without a path (Close/Cleanup/OpEnd) are dropped.
-    // Events without a path (Close/Cleanup/OpEnd) are dropped.
+    // ETW EventCallback — manual MOF parser for the NT Kernel Logger
+    // FileIo events (TdhGetEventInformation returns 1168 for them).
+    // Layouts with 8-byte pointers (x64/arm64), per the FileIo_* classes:
+    //   64       Create      IrpPtr@0 FileObject@8 TTID@16 CreateOptions@20
+    //                        FileAttributes@24 ShareAccess@28 OpenPath@32
+    //   65/66    Cleanup/Close  IrpPtr@0 FileObject@8 FileKey@16 TTID@24
+    //   67/68    Read/Write  Offset@0 IrpPtr@8 FileObject@16 FileKey@24
+    //                        TTID@32 IoSize@36 IoFlags@40
+    //   69/70/71 SetInfo/Delete/Rename  IrpPtr@0 FileObject@8 FileKey@16
+    //                        ExtraInfo@24 TTID@32 InfoClass@36
+    //   0/32/35/36 Name/FileCreate/FileDelete/FileRundown
+    //                        FileKey@0 FileName@8
+    // Only Create and the Name family carry a path; the other operations
+    // are resolved through the FileObject seen at Create, or the FileKey
+    // seen in a Name event (files opened before the capture started).
+    static constexpr std::uint16_t kOpName = 0, kOpFileCreate = 32, kOpFileDelete = 35,
+                                   kOpFileRundown = 36, kOpCreate = 64, kOpCleanup = 65,
+                                   kOpClose = 66, kOpRead = 67, kOpWrite = 68,
+                                   kOpSetInfo = 69, kOpDelete = 70, kOpRename = 71;
+
+    // Reads a NUL-terminated UTF-16 path at `off`, translates the NT
+    // device prefix and checks the scope. On success the canonical path
+    // is in etwPathScratch[0..outLen).
+    bool etw_scoped_path(const std::uint8_t* ud, std::size_t udLen, std::size_t off,
+                         std::size_t& outLen) noexcept {
+        if (udLen < off + 2) return false;
+        const auto* src = reinterpret_cast<const wchar_t*>(ud + off);
+        const std::size_t maxChars = std::min<std::size_t>((udLen - off) / 2, kMaxRecordPathChars);
+        std::size_t pathLen = 0;
+        while (pathLen < maxChars && src[pathLen] != L'\0') pathLen++;
+        if (pathLen == 0) return false;
+
+        // \Device\HarddiskVolumeN\... -> C:\... (unknown prefixes kept).
+        wchar_t* out = etwPathScratch;
+        outLen = 0;
+        bool translated = false;
+        if (pathLen >= 9 && src[0] == L'\\' && src[1] == L'D') {
+            for (std::size_t idx = 0; idx < devicePrefixCount && !translated; ++idx) {
+                const auto& dp = devicePrefixesFixed[idx];
+                const std::size_t devLen = dp.deviceLen;
+                if (pathLen <= devLen || src[devLen] != L'\\') continue;
+                bool match = true;
+                for (std::size_t i = 0; i < devLen; i++) {
+                    if (towlower(src[i]) != towlower(dp.device[i])) { match = false; break; }
+                }
+                if (!match) continue;
+                const std::size_t remaining = pathLen - devLen;
+                if (dp.driveLen + remaining > kMaxRecordPathChars) break;
+                std::memcpy(out, dp.drive, dp.driveLen * sizeof(wchar_t));
+                std::memcpy(out + dp.driveLen, src + devLen, remaining * sizeof(wchar_t));
+                outLen = dp.driveLen + remaining;
+                translated = true;
+            }
+        }
+        if (!translated) {
+            std::memcpy(out, src, pathLen * sizeof(wchar_t));
+            outLen = pathLen;
+        }
+
+        // Scope: the path must equal the root or live below it.
+        auto under = [&](const std::wstring& root) {
+            const std::size_t n = root.size();
+            if (n == 0 || outLen < n) return false;
+            for (std::size_t i = 0; i < n; i++) {
+                if (towlower(out[i]) != root[i]) return false;
+            }
+            return outLen == n || out[n] == L'\\';
+        };
+        if (under(etwRootLower)) return true;
+        if (under(etwRootAliasLower)) {
+            // Opened through the 8.3 alias: rewrite to the canonical root.
+            const std::size_t aliasLen = etwRootAliasLower.size();
+            const std::size_t tail = outLen - aliasLen;
+            if (etwTargetRoot.size() + tail > kMaxRecordPathChars) return false;
+            std::memmove(out + etwTargetRoot.size(), out + aliasLen, tail * sizeof(wchar_t));
+            std::memcpy(out, etwTargetRoot.data(), etwTargetRoot.size() * sizeof(wchar_t));
+            outLen = etwTargetRoot.size() + tail;
+            return true;
+        }
+        // Mixed short/long spellings (C:\Users\FRANCI~1\...\long-name\f):
+        // expand the parent directory, which exists even when the leaf is
+        // being created, and retry.
+        if (std::find(out, out + outLen, L'~') == out + outLen) return false;
+        std::size_t slash = outLen;
+        while (slash > 0 && out[slash - 1] != L'\\') slash--;
+        if (slash < 2) return false;
+        const std::wstring dir(out, slash - 1);
+        auto it = etwLongDirCache.find(dir);
+        if (it == etwLongDirCache.end()) {
+            if (etwLongDirCache.size() > 65536) etwLongDirCache.clear();
+            std::wstring longDir;
+            const std::wstring lp = to_long_path(dir);
+            const DWORD need = GetLongPathNameW(lp.c_str(), nullptr, 0);
+            if (need > 0) {
+                std::vector<wchar_t> buf(need);
+                const DWORD len = GetLongPathNameW(lp.c_str(), buf.data(), need);
+                if (len > 0 && len < need) longDir = strip_long_prefix(std::wstring_view(buf.data(), len));
+            }
+            it = etwLongDirCache.emplace(dir, std::move(longDir)).first;
+        }
+        const std::wstring& longDir = it->second;
+        if (longDir.empty() || longDir == dir) return false;
+        const std::size_t tail = outLen - (slash - 1);
+        if (longDir.size() + tail > kMaxRecordPathChars) return false;
+        std::memmove(out + longDir.size(), out + slash - 1, tail * sizeof(wchar_t));
+        std::memcpy(out, longDir.data(), longDir.size() * sizeof(wchar_t));
+        outLen = longDir.size() + tail;
+        return under(etwRootLower);
+    }
+
+    static std::uint64_t ud_u64(const std::uint8_t* ud, std::size_t off) noexcept {
+        std::uint64_t v = 0;
+        std::memcpy(&v, ud + off, sizeof(v));
+        return v;
+    }
+    static std::uint32_t ud_u32(const std::uint8_t* ud, std::size_t off) noexcept {
+        std::uint32_t v = 0;
+        std::memcpy(&v, ud + off, sizeof(v));
+        return v;
+    }
+
     static VOID WINAPI EtwEventCallback(PEVENT_RECORD rec) {
         auto* self = static_cast<Impl*>(rec->UserContext);
         if (!self) return;
-        // Early exit if stopping to avoid race during teardown
         if (self->etwStopRequested.load(std::memory_order_relaxed)) return;
         self->etwEventsObserved.fetch_add(1, std::memory_order_relaxed);
 
         const GUID& provider = rec->EventHeader.ProviderId;
+        const bool isFileIo = (provider == Microsoft_Windows_Kernel_File_MOF_GUID) ||
+                              (provider.Data1 == 0x90CBDC39);
+        if (!isFileIo) return;
+        // 32-bit producers use 4-byte pointers; every layout above assumes 8.
+        if (rec->EventHeader.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) return;
+
+        const auto* ud = static_cast<const std::uint8_t*>(rec->UserData);
+        const std::size_t udLen = rec->UserDataLength;
+        if (!ud) return;
         const std::uint16_t opcode = rec->EventHeader.EventDescriptor.Opcode;
 
-        // Only Kernel FileIo (Manifest or MOF) and Kernel Process are in scope.
-        // NT Kernel Logger uses MOF provider with Data1=0x90CBDC39 (surveyed).
-        // Manifest provider has Data1=0xBCC65049.
-        const bool isFileIo = (provider == Microsoft_Windows_Kernel_File_GUID) ||
-                               (provider == Microsoft_Windows_Kernel_File_MOF_GUID) ||
-                               (provider.Data1 == 0x90CBDC39);  // MOF Kernel FileIo (surveyed)
-        const bool isProcess = (provider == Microsoft_Windows_Kernel_Process_GUID);
-        if (!isFileIo && !isProcess) return;
+        std::size_t outLen = 0;
+        std::uint16_t kind = 0;
+        std::uint64_t irpPtr = 0;
+        std::uint64_t byteOffset = 0;
+        std::uint32_t byteLen = 0, shareAccess = 0, createOpts = 0, createDisp = 0;
+        const wchar_t* path = nullptr;
 
-        // Validate UserData pointer and length.
-        const auto* ud = static_cast<const std::uint8_t*>(rec->UserData);
-        const auto udLen = rec->UserDataLength;
-        if (!ud || udLen < 34) {  // need at least 32 bytes header + 2 bytes for NUL
-            self->etwWithoutPath.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-
-        // Extract path from fixed offset 32 (UTF-16, NUL-terminated).
-        // Use a fixed-size stack buffer to avoid std::wstring allocation in callback.
-        wchar_t pathBuf[1024];
-        std::size_t pathLen = 0;
-        if (32 + 2 <= udLen) {
-            const auto* p = reinterpret_cast<const wchar_t*>(ud + 32);
-            const auto maxChars = (udLen - 32) / 2;
-            while (pathLen < maxChars && pathLen < 1023 && p[pathLen] != L'\0') {
-                pathBuf[pathLen] = p[pathLen];
-                pathLen++;
-            }
-        }
-        if (pathLen == 0) {
-            self->etwWithoutPath.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-        pathBuf[pathLen] = L'\0';
-
-        // Translate device path and check scope using fixed arrays (no heap allocation).
-        // First, try to translate device prefix to DOS drive letter.
-        wchar_t translatedPath[1024];
-        std::size_t translatedLen = 0;
-        bool translated = false;
-        if (pathLen >= 9 && pathBuf[0] == L'\\' && pathBuf[1] == L'D') {
-            for (std::size_t idx = 0; idx < self->devicePrefixCount; ++idx) {
-                const std::size_t devLen = self->devicePrefixesFixed[idx].deviceLen;
-                if (pathLen > devLen && pathBuf[devLen] == L'\\') {
-                    bool match = true;
-                    for (std::size_t i = 0; i < devLen; i++) {
-                        wchar_t pc = pathBuf[i];
-                        wchar_t dc = self->devicePrefixesFixed[idx].device[i];
-                        // Case-insensitive compare
-                        if (pc >= L'A' && pc <= L'Z') pc += L'a' - L'A';
-                        if (dc >= L'A' && dc <= L'Z') dc += L'a' - L'A';
-                        if (pc != dc) { match = false; break; }
-                    }
-                    if (match) {
-                        // Copy drive letter (e.g., "C:")
-                        const std::size_t driveLen = self->devicePrefixesFixed[idx].driveLen;
-                        translatedLen = driveLen;
-                        for (std::size_t i = 0; i < translatedLen; i++) {
-                            translatedPath[i] = self->devicePrefixesFixed[idx].drive[i];
-                        }
-                        // Copy rest of path
-                        std::size_t remaining = pathLen - devLen;
-                        if (translatedLen + remaining < 1024) {
-                            for (std::size_t i = 0; i < remaining; i++) {
-                                translatedPath[translatedLen + i] = pathBuf[devLen + i];
-                            }
-                            translatedLen += remaining;
-                            translatedPath[translatedLen] = L'\0';
-                            translated = true;
-                        }
-                        break;
-                    }
+        switch (opcode) {
+            case kOpName: case kOpFileCreate: case kOpFileRundown: {
+                if (udLen < 10) return;
+                const std::uint64_t key = ud_u64(ud, 0);
+                if (self->etw_scoped_path(ud, udLen, 8, outLen)) {
+                    if (self->etwKeyPaths.size() > kMaxTrackedHandles) self->etwKeyPaths.clear();
+                    self->etwKeyPaths.insert_or_assign(key, std::wstring(self->etwPathScratch, outLen));
+                } else {
+                    self->etwKeyPaths.erase(key);
                 }
+                return;
             }
-        }
-        if (!translated) {
-            // No device prefix match, use path as-is
-            translatedLen = pathLen;
-            for (std::size_t i = 0; i < translatedLen; i++) {
-                translatedPath[i] = pathBuf[i];
+            case kOpFileDelete: {
+                if (udLen >= 8) self->etwKeyPaths.erase(ud_u64(ud, 0));
+                return;
             }
-            translatedPath[translatedLen] = L'\0';
-        }
-
-        // Check if translated path starts with etwTargetRoot (case-insensitive, path-aware)
-        // etwTargetRootFixed is like "C:\watched" (no trailing backslash, lowercase)
-        // translatedPath is like "C:\watched\file.txt" (mixed case)
-        bool inScope = false;
-        std::size_t rootLen = self->etwTargetRootFixedLen;
-        if (translatedLen >= rootLen) {
-            bool match = true;
-            for (std::size_t i = 0; i < rootLen; i++) {
-                wchar_t tc = translatedPath[i];
-                wchar_t rc = self->etwTargetRootFixed[i];
-                // Case-insensitive compare (translatedPath may have mixed case)
-                if (tc >= L'A' && tc <= L'Z') tc += L'a' - L'A';
-                // rc is already lowercase
-                if (tc != rc) { match = false; break; }
-            }
-            if (match) {
-                // Exact match or path is deeper (next char is backslash)
-                if (translatedLen == rootLen || translatedPath[rootLen] == L'\\') {
-                    inScope = true;
+            case kOpCreate: {
+                if (udLen < 34) { self->etwWithoutPath.fetch_add(1, std::memory_order_relaxed); return; }
+                irpPtr = ud_u64(ud, 0);
+                const std::uint64_t fileObject = ud_u64(ud, 8);
+                const std::uint32_t options = ud_u32(ud, 20);
+                shareAccess = ud_u32(ud, 28);
+                createOpts = options & 0x00FFFFFFu;
+                createDisp = options >> 24;
+                if (!self->etw_scoped_path(ud, udLen, 32, outLen)) {
+                    self->etwObjPaths.erase(fileObject);
+                    self->etwOutOfScope.fetch_add(1, std::memory_order_relaxed);
+                    return;
                 }
+                if (self->etwObjPaths.size() > kMaxTrackedHandles) self->etwObjPaths.clear();
+                self->etwObjPaths.insert_or_assign(fileObject, std::wstring(self->etwPathScratch, outLen));
+                path = self->etwPathScratch;
+                // FILE_OPEN (1) / FILE_OPEN_IF (3) on an existing file is an
+                // open; actual creation is confirmed by USN and the inventories.
+                kind = (createDisp == 1 || createDisp == 3) ? kKindOpen : kKindCreate;
+                break;
             }
-        }
-        if (!inScope) {
-            self->etwOutOfScope.fetch_add(1, std::memory_order_relaxed);
-            return;
+            case kOpCleanup:
+                return;  // Close follows; one end-of-handle event is enough.
+            case kOpClose: case kOpRead: case kOpWrite:
+            case kOpSetInfo: case kOpDelete: case kOpRename: {
+                const bool rw = opcode == kOpRead || opcode == kOpWrite;
+                const std::size_t objOff = rw ? 16 : 8;
+                if (udLen < objOff + 16) return;
+                irpPtr = ud_u64(ud, rw ? 8 : 0);
+                const std::uint64_t fileObject = ud_u64(ud, objOff);
+                const std::uint64_t fileKey = ud_u64(ud, objOff + 8);
+                const std::wstring* known = nullptr;
+                if (auto it = self->etwObjPaths.find(fileObject); it != self->etwObjPaths.end()) {
+                    known = &it->second;
+                } else if (auto kt = self->etwKeyPaths.find(fileKey); kt != self->etwKeyPaths.end()) {
+                    known = &kt->second;
+                }
+                if (!known) {
+                    self->etwOutOfScope.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                outLen = known->size();
+                std::memcpy(self->etwPathScratch, known->data(), outLen * sizeof(wchar_t));
+                path = self->etwPathScratch;
+                if (rw) {
+                    byteOffset = ud_u64(ud, 0);
+                    if (udLen >= 40) byteLen = ud_u32(ud, 36);
+                }
+                switch (opcode) {
+                    case kOpClose:   kind = kKindClose; break;
+                    case kOpRead:    kind = kKindRead; break;
+                    case kOpWrite:   kind = kKindWrite; break;
+                    case kOpSetInfo: kind = kKindSetInfo; break;
+                    case kOpDelete:  kind = kKindDelete; break;
+                    default:         kind = kKindRename; break;
+                }
+                if (opcode == kOpClose) self->etwObjPaths.erase(fileObject);
+                break;
+            }
+            default:
+                return;
         }
         self->etwAfterScope.fetch_add(1, std::memory_order_relaxed);
-
-        const std::uint16_t kind = map_kind(opcode, provider);
-        if (kind == 0) {
-            self->etwKindZero.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
         self->etwAfterKind.fetch_add(1, std::memory_order_relaxed);
 
-        std::uint64_t irpPtr = 0;
-        if (ud && udLen >= 16) {
-            irpPtr = *reinterpret_cast<const std::uint64_t*>(ud + 8);
-        }
-
-        // Extract Create-specific fields (only meaningful for op=64).
-        std::uint32_t createOpts = 0, createDisp = 0, shareAccess = 0;
-        // TEMP: Disable this - it crashes
-        // if (isFileIo && opcode == 64 && udLen >= 28) {
-        //     createOpts  = *reinterpret_cast<const std::uint32_t*>(ud + 16);
-        //     createDisp  = *reinterpret_cast<const std::uint32_t*>(ud + 20);
-        //     shareAccess = *reinterpret_cast<const std::uint32_t*>(ud + 24);
-        // }
-
-        LARGE_INTEGER qpc{}, freq{};
-        QueryPerformanceCounter(&qpc);
+        // Real-time sessions started with ClientContext=1 stamp events
+        // with raw QPC: the same clock domain as nowNs().
+        LARGE_INTEGER freq{}, now{};
         QueryPerformanceFrequency(&freq);
-        const std::uint64_t ts = qpc_to_ns(qpc, freq);
+        QueryPerformanceCounter(&now);
+        std::uint64_t ts = qpc_to_ns(rec->EventHeader.TimeStamp, freq);
+        const std::uint64_t nowNs = qpc_to_ns(now, freq);
+        // An attached (not owned) session may use another clock type.
+        if (ts > nowNs || nowNs - ts > 60ull * 1000000000ull) ts = nowNs;
 
-        // Use RawEtwSlot for fast callback encoding
-        RawEtwSlot rawSlot;
-        encode_raw_slot(&rawSlot,
+        // Header in the public layout; the process name is added by drain().
+        alignas(8) std::uint8_t slotBuf[HARIL_SLOT_SIZE];
+        encode_event_slot(std::span<std::uint8_t, HARIL_SLOT_SIZE>(slotBuf),
             HARIL_SOURCE_ETW, kind, ts,
             rec->EventHeader.ProcessId,
             rec->EventHeader.ThreadId,
-            irpPtr, 0, nullptr, 0, 0, 0,
+            irpPtr, 0, nullptr, 0,
+            static_cast<std::uint32_t>(byteOffset), byteLen,
             shareAccess, createOpts, createDisp,
-            static_cast<std::uint32_t>(self->etwEventsObserved.load()),
-            pathBuf, pathLen,  // use the device path directly; translate at decode time
-            L"", 0);
-        // Push raw bytes to ring buffer - check if still running
+            static_cast<std::uint32_t>(self->etwEventsObserved.load(std::memory_order_relaxed)),
+            std::wstring_view{});
         if (!self->etwRunning.load(std::memory_order_relaxed)) return;
         self->etwPushAttempted.fetch_add(1, std::memory_order_relaxed);
-        if (!self->ring.push(std::span<const std::uint8_t>(
-                reinterpret_cast<const std::uint8_t*>(&rawSlot),
-                sizeof(RawEtwSlot)))) {
+        if (!self->ring.push_record(slotBuf, path, outLen)) {
             self->etwRingPushFailed.fetch_add(1, std::memory_order_relaxed);
         }
     }
-
     static ULONG WINAPI EtwBufferCallback(PEVENT_TRACE_LOGFILEW buf) {
         if (buf->LogfileHeader.EventsLost > 0) {
             auto* self = static_cast<Impl*>(buf->Context);
@@ -968,23 +984,14 @@ struct HarilContext::Impl {
         static constexpr wchar_t kKernelLoggerName[] = L"NT Kernel Logger";
         const std::wstring_view canonical(kKernelLoggerName);
         etwSessionName.assign(canonical.begin(), canonical.end());
-        etwTargetRoot.assign(root.begin(), root.end());
-        // Populate fixed buffer for callback (lowercase, no trailing backslash)
-        etwTargetRootFixedLen = 0;
-        for (std::size_t i = 0; i < root.size() && etwTargetRootFixedLen < 511; i++) {
-            wchar_t c = root[i];
-            if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
-            if (etwTargetRootFixedLen > 0 && c == L'\\' && etwTargetRootFixed[etwTargetRootFixedLen - 1] == L'\\') {
-                // Skip duplicate backslash
-                continue;
-            }
-            etwTargetRootFixed[etwTargetRootFixedLen++] = c;
-        }
-        // Remove trailing backslash
-        if (etwTargetRootFixedLen > 0 && etwTargetRootFixed[etwTargetRootFixedLen - 1] == L'\\') {
-            etwTargetRootFixedLen--;
-        }
-        etwTargetRootFixed[etwTargetRootFixedLen] = L'\0';
+        etwTargetRoot = canonical_dir_path(root);
+        procNameCache.clear();
+        etwRootLower = lower_root_for_cmp(etwTargetRoot);
+        etwRootAliasLower = lower_root_for_cmp(short_path_alias(etwTargetRoot));
+        if (etwRootAliasLower == etwRootLower) etwRootAliasLower.clear();
+        etwObjPaths.clear();
+        etwKeyPaths.clear();
+        etwLongDirCache.clear();
         (void)session;  // retained in the signature for file-session support
 
         constexpr std::size_t kReserved = 32;
@@ -1000,8 +1007,14 @@ struct HarilContext::Impl {
         p->Wnode.ClientContext = 1;
         p->LogFileMode         = EVENT_TRACE_REAL_TIME_MODE;
         p->FlushTimer          = 1;
-        p->EnableFlags         = EVENT_TRACE_FLAG_PROCESS | EVENT_TRACE_FLAG_THREAD
-                                | EVENT_TRACE_FLAG_IMAGE_LOAD | EVENT_TRACE_FLAG_DISK_FILE_IO
+        // Larger, more numerous kernel buffers: FileIo is bursty and the
+        // defaults drop thousands of events per second under load.
+        p->BufferSize          = 1024;  // KB
+        p->MinimumBuffers      = 64;
+        p->MaximumBuffers      = 256;
+        // FILE_IO_INIT: Create/Read/Write/... ; DISK_FILE_IO: FileKey names
+        // (incl. rundown for already-open files); PROCESS for pid lifetime.
+        p->EnableFlags         = EVENT_TRACE_FLAG_PROCESS | EVENT_TRACE_FLAG_DISK_FILE_IO
                                 | EVENT_TRACE_FLAG_FILE_IO | EVENT_TRACE_FLAG_FILE_IO_INIT;
         p->LoggerNameOffset    = sizeof(EVENT_TRACE_PROPERTIES);
         p->LogFileNameOffset   = 0;
@@ -1092,12 +1105,37 @@ struct HarilContext::Impl {
                 if (r->RecordLength == 0) break;
                 if (p + r->RecordLength > end) break;
 
+// Directories are not file lifecycles; only drop cached
+                // names when they move so children resolve again.
+                if (r->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    if (r->Reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME | USN_REASON_FILE_DELETE)) {
+                        usnDirCache.clear();
+                    }
+                    p += r->RecordLength;
+                    continue;
+                }
+
                 const std::uint64_t frn =
                     static_cast<std::uint64_t>(r->FileReferenceNumber);
-                std::wstring resolved = resolve_frn_path(frn);
+                const std::uint64_t parentFrn =
+                    static_cast<std::uint64_t>(r->ParentFileReferenceNumber);
+                // Name as recorded (correct for deletes and old rename
+                // names), under the parent's current path; fall back to
+                // the file's own current path.
+                std::wstring resolved;
+                const std::wstring& parent = resolve_dir_path(parentFrn);
+                if (!parent.empty()) {
+                    const auto* name = reinterpret_cast<const wchar_t*>(
+                        reinterpret_cast<const std::uint8_t*>(r) + r->FileNameOffset);
+                    resolved = parent;
+                    if (resolved.back() != L'\\') resolved.push_back(L'\\');
+                    resolved.append(name, r->FileNameLength / sizeof(wchar_t));
+                } else {
+                    resolved = resolve_frn_path(frn);
+                }
                 if (resolved.empty()) {
-                    // File already gone or not ours to name: drop the
-                    // record but count it so coverage stays honest.
+                    // Neither the file nor its parent can be named: drop
+                    // the record but count it so coverage stays honest.
                     usnDroppedUnresolved.fetch_add(1, std::memory_order_relaxed);
                     p += r->RecordLength;
                     continue;
@@ -1107,24 +1145,28 @@ struct HarilContext::Impl {
                     continue;
                 }
 
-                std::uint8_t slotBuf[HARIL_SLOT_SIZE];
+                alignas(8) std::uint8_t slotBuf[HARIL_SLOT_SIZE];
                 std::span<std::uint8_t, HARIL_SLOT_SIZE> slot(slotBuf);
                 LARGE_INTEGER qpc{}, freq{};
                 QueryPerformanceCounter(&qpc);
                 QueryPerformanceFrequency(&freq);
                 const std::uint64_t ts = qpc_to_ns(qpc, freq);
 
+                // NTFS FILE_ID_128 is the 64-bit FRN zero-extended, the
+                // same identity the inventory reads via FILE_ID_INFO.
+                std::uint8_t fileId[16] = {0};
+                std::memcpy(fileId, &frn, sizeof(frn));
                 encode_event_slot(slot, HARIL_SOURCE_USN, kKindNotify, ts,
-                                  0, 0, 0, 0, nullptr, 0,
+                                  0, 0, 0, 0, fileId, usnVolumeSerial,
                                   0, 0, 0, 0, 0,
                                   static_cast<std::uint32_t>(usnRecordsRead.load()),
-                                  resolved, L"");
+                                  std::wstring_view{});
                 encode_usn_extension(slot,
                     frn,
-                    static_cast<std::uint64_t>(r->ParentFileReferenceNumber),
+                    parentFrn,
                     static_cast<std::uint64_t>(r->Usn),
                     static_cast<std::uint32_t>(r->Reason));
-                ring.push(slot);
+                ring.push_record(slotBuf, resolved.data(), resolved.size());
                 usnRecordsRead.fetch_add(1);
 
                 p += r->RecordLength;
@@ -1135,7 +1177,7 @@ struct HarilContext::Impl {
     }
 
     // Resolve an FRN to its current DOS path (L"C:\\..."). Empty when
-    // the file cannot be opened (deleted, transient) — callers drop it.
+    // the file cannot be opened (deleted, transient).
     std::wstring resolve_frn_path(std::uint64_t frn) {
         FILE_ID_DESCRIPTOR fid{};
         fid.dwSize = sizeof(fid);
@@ -1143,23 +1185,51 @@ struct HarilContext::Impl {
         fid.FileId.QuadPart = static_cast<LONGLONG>(frn);
         UniqueHandle h(make_unique(OpenFileById(
             usnVolumeHandle.get(), &fid,
-            GENERIC_READ,
+            0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, 0)));
+            nullptr, FILE_FLAG_BACKUP_SEMANTICS)));
         if (!h) return {};
-        // VOLUME_NAME_DOS yields L"C:\\dir\\file" without the \\?\ prefix.
-        std::vector<wchar_t> out(1024);
+        // GetFinalPathNameByHandleW always returns the \\?\ form; size the
+        // buffer from the first call so long paths are not truncated.
+        std::vector<wchar_t> out(512);
         DWORD len = GetFinalPathNameByHandleW(h.get(), out.data(),
                                               static_cast<DWORD>(out.size()),
                                               VOLUME_NAME_DOS);
+        if (len >= out.size()) {
+            out.resize(static_cast<std::size_t>(len) + 1);
+            len = GetFinalPathNameByHandleW(h.get(), out.data(),
+                                            static_cast<DWORD>(out.size()),
+                                            VOLUME_NAME_DOS);
+        }
         if (len == 0 || len >= out.size()) return {};
-        return std::wstring(out.data(), len);
+        return strip_long_prefix(std::wstring_view(out.data(), len));
     }
 
+    // Cached directory FRN -> path (empty string when unresolvable).
+    const std::wstring& resolve_dir_path(std::uint64_t frn) {
+        auto it = usnDirCache.find(frn);
+        if (it != usnDirCache.end()) return it->second;
+        if (usnDirCache.size() > 65536) usnDirCache.clear();
+        return usnDirCache.emplace(frn, resolve_frn_path(frn)).first->second;
+    }
     int32_t usn_start(std::wstring_view volume, std::wstring_view root) {
         if (usnRunning) return -1;
         usnVolume.assign(volume.begin(), volume.end());
-        usnTargetRoot.assign(root.begin(), root.end());
+        usnTargetRoot = canonical_dir_path(root);
+        usnDirCache.clear();
+        usnVolumeSerial = 0;
+        {
+            // Same volume serial the inventory reads via FILE_ID_INFO, so
+            // USN identities match inventory identities.
+            const UniqueHandle hr(make_unique(CreateFileW(
+                to_long_path(usnTargetRoot).c_str(), 0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr)));
+            FILE_ID_INFO id{};
+            if (hr && GetFileInformationByHandleEx(hr.get(), FileIdInfo, &id, sizeof(id))) {
+                usnVolumeSerial = static_cast<std::uint32_t>(id.VolumeSerialNumber);
+            }
+        }
         usnVolumeHandle = make_unique(CreateFileW(
             std::wstring(volume).c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -1208,32 +1278,55 @@ struct HarilContext::Impl {
         return static_cast<std::int32_t>(recs.size());
     }
 
+    // Base name of a process image, cached per pid. pid 0/4 are kernel.
+    const std::wstring& process_name(std::uint32_t pid) {
+        auto it = procNameCache.find(pid);
+        if (it != procNameCache.end()) return it->second;
+        std::wstring name;
+        if (pid == 0) {
+            name = L"Idle";
+        } else if (pid == 4) {
+            name = L"System";
+        } else {
+            const UniqueHandle h(make_unique(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)));
+            if (h) {
+                std::vector<wchar_t> buf(1024);
+                DWORD len = static_cast<DWORD>(buf.size());
+                if (QueryFullProcessImageNameW(h.get(), 0, buf.data(), &len) && len > 0) {
+                    std::wstring_view full(buf.data(), len);
+                    const auto slash = full.find_last_of(L"\\/");
+                    name.assign(slash == std::wstring_view::npos ? full : full.substr(slash + 1));
+                }
+            }
+        }
+        if (procNameCache.size() > 8192) procNameCache.clear();
+        return procNameCache.emplace(pid, std::move(name)).first->second;
+    }
+
     int32_t drain(std::uint8_t* out_buf, std::int32_t max_slots,
                    std::uint64_t* out_seq) {
         std::uint64_t seq = 0;
-        // Pop raw slots into a temporary buffer
         const int n = ring.pop_batch(
             std::span<std::uint8_t>(out_buf, static_cast<std::size_t>(max_slots) * HARIL_SLOT_SIZE),
             &seq);
-        // Decode each raw slot in-place to the full HARIL_SLOT_SIZE format
-        for (int i = 0; i < n; i++) {
+        // Walk record heads (skipping continuation slots) and add the
+        // process image name to ETW records.
+        for (int i = 0; i < n;) {
             std::uint8_t* slot = out_buf + static_cast<std::size_t>(i) * HARIL_SLOT_SIZE;
-            // Check if this is a raw ETW slot (source == HARIL_SOURCE_ETW)
             const std::uint16_t source = *reinterpret_cast<std::uint16_t*>(slot);
+            const std::uint16_t extra = *reinterpret_cast<std::uint16_t*>(slot + 80);
             if (source == HARIL_SOURCE_ETW) {
-                const RawEtwSlot* raw = reinterpret_cast<const RawEtwSlot*>(slot);
-                // Use a temp buffer to decode, then copy back
-                std::array<std::uint8_t, HARIL_SLOT_SIZE> decoded;
-                decoded.fill(0);
-                decode_raw_slot(raw, decoded);
-                std::memcpy(slot, decoded.data(), HARIL_SLOT_SIZE);
+                const std::uint32_t pid = *reinterpret_cast<std::uint32_t*>(slot + 12);
+                const std::wstring& name = process_name(pid);
+                put_slot_string(slot, HARIL_SLOT_PROC_OFFSET, HARIL_SLOT_PROC_CHARS, 78,
+                                name.data(), name.size());
             }
+            i += 1 + extra;
         }
         if (out_seq) *out_seq = seq;
         return n;
     }
 };
-
 // ----------------------- HarilContext facade -----------------------
 
 HarilContext::HarilContext() : impl_(std::make_unique<Impl>()) {
@@ -1355,7 +1448,7 @@ int32_t get_file_id_impl(std::wstring_view path,
                           std::uint8_t* out_id16,
                           std::uint32_t* out_volume_serial) {
     const UniqueHandle h(make_unique(CreateFileW(
-        std::wstring(path).c_str(), 0,
+        to_long_path(path).c_str(), 0,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr)));
     if (!h) return GetLastError();

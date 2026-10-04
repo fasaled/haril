@@ -14,6 +14,7 @@
 import { render } from "ink";
 import React from "react";
 import { App } from "./tui/App.tsx";
+import { KEYBOARD_HELP } from "./tui/keys.ts";
 import { serveMcp } from "./mcp/serve.ts";
 import { runCompletion } from "./completion.ts";
 import { HarilSession, createSession } from "@haril-ts/core";
@@ -117,8 +118,11 @@ USAGE
 
 Inside the TUI:
   Empty phase:
+    ls [dir] [--pattern <glob>], cd <dir>, pwd   (filesystem)
     open <path.haril>
-    start-capture --root <dir> --output <file.haril> --seconds <n>
+    start-capture [--root <dir>] [--output <file.haril>] [--seconds <n>]
+      (defaults: root = working directory, output = haril-YYYYMMDD-HHMMSS.haril
+       in the working directory, 30 seconds)
 
   Live Capture phase:
     stop-capture
@@ -130,8 +134,8 @@ Inside the TUI:
     events, evidence, overview, summary, dirs, size-changes, search
     capture, heuristics [on|off], zoom
 
-  TUI shortcuts:
-    :  \\  s  v  c  h  ?  n N  o f p e r  Ctrl+Q
+  Keyboard:
+${KEYBOARD_HELP.replace(/^/gm, "    ")}
 
 Project: see README.md and docs/`);
 }

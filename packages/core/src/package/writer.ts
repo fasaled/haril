@@ -66,7 +66,10 @@ export function writePackage(outPath: string, input: PackageInput): Manifest {
   const entries = Object.entries(data).map(([name, bytes]) => ({ name, data: bytes }));
   const zipBytes = buildZip(entries);
 
-  mkdirSync(dirname(outPath), { recursive: true });
+  const dir = dirname(outPath);
+  if (dir && dir !== "." && dir !== "") {
+    mkdirSync(dir, { recursive: true });
+  }
   writeFileSync(outPath, zipBytes);
 
   return manifest;

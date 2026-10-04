@@ -108,27 +108,27 @@ The addon exports 18 N-API functions wrapped in `napi_addon.cpp`. The public hea
 | `haril_get_file_id()` | Extract volume serial + FILE_ID_INFO from path |
 | `haril_is_admin()` | Check if running elevated (`CheckTokenMembership`) |
 | `haril_relaunch_elevated()` | `ShellExecuteExW(Verb="runas")` with COM init |
-| `haril_drain()` | Drain ring buffer slot into buffer (256 bytes each) |
+| `haril_drain()` | Drain whole ring records into a buffer (1,024-byte slots) |
 
 Strings are UTF-16LE with explicit length because N-API does not auto-convert UTF-8 to UTF-16LE; the `napi_addon.cpp` wrapper converts JS strings on the way in.
 
 ## Disruptor Ring Buffer Engine (Lock-Free MPSC)
 
 The ring buffer implements the LMAX Disruptor pattern for Multi-Producer Single-Consumer (MPSC) concurrency without locks:
-- Pre-allocated 64 MiB ring storage (262,144 slots × 256 bytes) via Win32 `VirtualAlloc`.
-- Ticket-claiming via atomic `fetch_add` on `head_seq_`.
+- Pre-allocated 64 MiB ring storage (65,536 slots × 1,024 bytes) via Win32 `VirtualAlloc`.
+- Whole-record claiming via CAS on `head_seq_` (head + continuation slots; nothing is claimed when the record does not fit).
 - Publication flags (`available_`) per slot updated with `std::memory_order_release`.
 - Batch consumer reading up to contiguous published sequences, updating `tail_seq_`.
 - Guarantees zero-lock dispatching from the Windows Kernel ETW callback thread, completely eliminating priority inversion and mutex stalls.
 
-## Slot layout (256 bytes, little-endian)
+## Slot layout (1,024 bytes, little-endian)
 
-Each ring buffer slot is 256 bytes, little-endian. Identical to the on-disk `.haril` event representation:
+A record is a head slot followed by `extraSlots` continuation slots (raw UTF-16LE, 512 units each). Paths longer than the 384 units stored inline continue there, up to 32,767 units (`HARIL_MAX_RECORD_SLOTS` = 65). `drain(ctx, maxSlots)` always returns whole records.
 
 | Offset | Size | Field |
 |---|---|---|
 | 0   | 2   | source (1=ETW, 2=USN, 3=FSW) |
-| 2   | 2   | EventKind |
+| 2   | 2   | EventKind (1=Create 2=Open 3=Read 4=SetInfo 5=Write 6=Close 7=Rename 8=Delete 9=OpEnd 10=Notify) |
 | 4   | 8   | timestamp_ns |
 | 12  | 4   | pid |
 | 16  | 4   | tid |
@@ -142,23 +142,24 @@ Each ring buffer slot is 256 bytes, little-endian. Identical to the on-disk `.ha
 | 64  | 4   | createOptions |
 | 68  | 4   | createDisposition |
 | 72  | 4   | sourceEventIndex |
-| 76  | 1   | observedPath length (chars, max 16) |
-| 80  | 32  | observedPath (UTF-16LE) |
-| 112 | 64  | processImageName (UTF-16LE) |
+| 76  | 2   | observedPath length (UTF-16 units, total) |
+| 78  | 2   | processImageName length |
+| 80  | 2   | extraSlots (continuation slots that follow) |
+| 112 | 64  | processImageName (UTF-16LE, 32 units) |
 | 176 | 8   | USN only: fileReferenceNumber (u64) |
 | 184 | 8   | USN only: parentFileReferenceNumber (u64) |
 | 192 | 8   | USN only: usn (u64) |
 | 200 | 4   | USN only: reason flags (u32) |
-| 204 | 52  | reserved |
+| 256 | 768 | observedPath, first 384 units (UTF-16LE) |
 
+The addon exports `slotSize`; the TS loader rejects an addon whose `slotSize` differs from `NATIVE_SLOT_SIZE`, so a stale extracted addon is never decoded with the wrong layout.
 ## ETW session naming
 
 The NT Kernel Logger only accepts its canonical session name (`NT Kernel Logger`); a custom name makes `StartTraceW` fail with `ERROR_INVALID_PARAMETER` (87). `etw_start` therefore always starts (or attaches to) the canonical session regardless of the name passed in. If another tool already owns the session (`ERROR_ALREADY_EXISTS`), we attach as a consumer and never stop a session we did not start (`etwOwnsSession` flag).
 
 ## USN journal identity in slot [176..204]
 
-The 256-byte slot has 80 reserved bytes. USN records need identity FRN that ETW slots do not carry. The USN producer writes `fileReferenceNumber`, `parentFileReferenceNumber`, `usn` (u64 each) and `reason` (u32) at slot offsets `[176..204]`. The TS decoder exposes them as `DecodedSlot.usn`.
-
+USN records need FRN identity that ETW slots do not carry. The USN producer writes `fileReferenceNumber`, `parentFileReferenceNumber`, `usn` (u64 each) and `reason` (u32) at slot offsets `[176..204]`, and the FRN zero-extended as `fileId128` with the root's volume serial (matching inventory keys). The TS decoder exposes them as `DecodedSlot.usn`.
 ## UAC scenario (confirmed end-to-end)
 
 After build, the following is verified:

@@ -21,15 +21,18 @@
  * The two domains are never mixed inside one package.
  */
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { writePackage } from "../package/writer.ts";
 import type {
+  FileKey,
   InventoryEntry,
   Manifest,
   NormalizedEvent,
   PathNotification,
   UsnRecord,
 } from "../model/types.ts";
+import { makePathKey } from "../model/fileKey.ts";
 import { walkInventory } from "./inventories.ts";
 import { FsWatcher } from "./fs_watcher.ts";
 import { native, type NativeBindings, type NativeInventoryRow } from "../ffi/bindings.ts";
@@ -42,6 +45,24 @@ export interface CaptureOptions {
   signal?: AbortSignal;
   /** Poll interval for the native drain loop. Default 50 ms. */
   drainIntervalMs?: number;
+  /** Live hooks, invoked while the capture window is open (for the TUI). */
+  live?: CaptureLiveHooks;
+}
+
+export interface CaptureLiveHooks {
+  onSources?: (info: { native: boolean; etw: boolean; usn: boolean; etwRc: number; usnRc: number }) => void;
+  onInventory?: (entries: InventoryEntry[]) => void;
+  onEvent?: (ev: NormalizedEvent) => void;
+  onNotification?: (n: PathNotification) => void;
+}
+
+function safeCall<T extends unknown[]>(fn: ((...args: T) => void) | undefined, ...args: T): void {
+  if (!fn) return;
+  try {
+    fn(...args);
+  } catch {
+    // live hooks must never break the capture
+  }
 }
 
 export interface CaptureResult {
@@ -59,6 +80,14 @@ function volumeOfRoot(root: string): string | null {
   return `\\\\.\\${m[0][0]!.toUpperCase()}:`;
 }
 
+function canonicalRoot(root: string): string {
+  try {
+    return realpathSync.native(root);
+  } catch {
+    return root;
+  }
+}
+
 function relativize(root: string, absolute: string): string {
   const lowerRoot = root.replace(/\//g, "\\").toLowerCase();
   const lowerAbs = absolute.replace(/\//g, "\\");
@@ -66,6 +95,106 @@ function relativize(root: string, absolute: string): string {
     return absolute.slice(root.length).replace(/\//g, "\\");
   }
   return absolute;
+}
+
+/**
+ * Tells directories apart from files for root-relative paths seen by
+ * ETW/USN, so directory activity does not show up as file lifecycles.
+ * Known files (initial inventory) short-circuit; other paths are
+ * `stat`ed once and cached.
+ */
+export class DirectoryClassifier {
+  private readonly cache = new Map<string, boolean>();
+
+  constructor(
+    private readonly root: string,
+    inventory: InventoryEntry[],
+  ) {
+    for (const e of inventory) {
+      const rel = e.path.toLowerCase();
+      this.cache.set(rel, (e.attributes & 0x10) !== 0);
+      // Every ancestor of an inventoried file is a directory.
+      let i = rel.lastIndexOf("\\");
+      while (i > 0) {
+        const parent = rel.slice(0, i);
+        if (this.cache.has(parent)) break;
+        this.cache.set(parent, true);
+        i = parent.lastIndexOf("\\");
+      }
+    }
+  }
+
+  isDirectory(rel: string): boolean {
+    if (rel === "" || rel === "\\") return true;
+    const key = rel.toLowerCase();
+    const hit = this.cache.get(key);
+    if (hit !== undefined) return hit;
+    let dir = false;
+    try {
+      dir = statSync(join(this.root, rel)).isDirectory();
+    } catch {
+      dir = false; // gone already: treat as a (transient) file
+    }
+    this.cache.set(key, dir);
+    return dir;
+  }
+}
+
+function inventoryKey(e: InventoryEntry): FileKey | null {
+  return e.fileId128 != null
+    ? { kind: "exact", volumeSerial: e.volumeSerial ?? 0n, fileId128: e.fileId128 }
+    : null;
+}
+
+/**
+ * Give keyless ETW/USN events a file identity, in timestamp order:
+ *   1. the identity most recently seen for that path (inventory or a
+ *      USN record carrying FILE_ID_128),
+ *   2. otherwise the next USN identity for that path (the journal lags
+ *      behind ETW, so a new file's Create precedes its first record),
+ *   3. the identity the path has in the final inventory,
+ *   4. a path-scoped key.
+ */
+export function attachFileKeys(
+  events: NormalizedEvent[],
+  initial: InventoryEntry[],
+  final: InventoryEntry[],
+  root: string,
+): void {
+  const current = new Map<string, FileKey>();
+  for (const e of initial) {
+    const k = inventoryKey(e);
+    if (k) current.set(e.path.toLowerCase(), k);
+  }
+  const finalByPath = new Map<string, FileKey>();
+  for (const e of final) {
+    const k = inventoryKey(e);
+    if (k) finalByPath.set(e.path.toLowerCase(), k);
+  }
+  const pending = new Map<string, NormalizedEvent[]>();
+  for (const ev of events) {
+    if (!ev.observedPath) continue;
+    const p = ev.observedPath.toLowerCase();
+    if (ev.fileKey) {
+      if (ev.fileKey.kind === "exact") {
+        current.set(p, ev.fileKey);
+        for (const w of pending.get(p) ?? []) w.fileKey = ev.fileKey;
+        pending.delete(p);
+      }
+      continue;
+    }
+    const known = current.get(p);
+    if (known) {
+      ev.fileKey = known;
+      continue;
+    }
+    const list = pending.get(p);
+    if (list) list.push(ev);
+    else pending.set(p, [ev]);
+  }
+  for (const [p, list] of pending) {
+    for (const ev of list) ev.fileKey = finalByPath.get(p) ?? makePathKey(root, ev.observedPath!);
+  }
 }
 
 function nativeRowsToEntries(
@@ -86,10 +215,14 @@ function nativeRowsToEntries(
   }));
 }
 
-export async function runCapture(opts: CaptureOptions): Promise<CaptureResult> {
-  if (opts.seconds < 1 || opts.seconds > 300) {
+export async function runCapture(rawOpts: CaptureOptions): Promise<CaptureResult> {
+  if (rawOpts.seconds < 1 || rawOpts.seconds > 300) {
     throw new Error("seconds must be between 1 and 300");
   }
+  // Every source must agree on one spelling of the root: kernel sources
+  // report long names, so resolve 8.3 aliases (C:\Users\FRANCI~1) and
+  // links up front.
+  const opts: CaptureOptions = { ...rawOpts, root: canonicalRoot(rawOpts.root) };
 
   const lib: NativeBindings | null = native();
   const clock = lib ? () => lib.nowNs() : () => process.hrtime.bigint();
@@ -119,6 +252,7 @@ export async function runCapture(opts: CaptureOptions): Promise<CaptureResult> {
   const initialInventory = lib
     ? nativeRowsToEntries(lib.inventoryWalk(opts.root), opts.root, startedAt_ns)
     : walkInventory({ root: opts.root, now_ns: startedAt_ns });
+  safeCall(opts.live?.onInventory, initialInventory);
 
   // 2. Native session: ETW + USN producers (best effort).
   let ctx: unknown = null;
@@ -151,6 +285,14 @@ export async function runCapture(opts: CaptureOptions): Promise<CaptureResult> {
     }
   }
 
+  safeCall(opts.live?.onSources, {
+    native: lib !== null,
+    etw: etwAvailable,
+    usn: usnAvailable,
+    etwRc: etwStartRc,
+    usnRc: usnStartRc,
+  });
+
   // 3. FSW watcher (always on).
   const watcher = new FsWatcher({
     root: opts.root,
@@ -158,12 +300,48 @@ export async function runCapture(opts: CaptureOptions): Promise<CaptureResult> {
     clock,
     onNotification: (n) => {
       notifications.push(n);
+      safeCall(opts.live?.onNotification, n);
     },
   });
   watcher.start();
 
   // 4. Drain loop while the window is open.
   const drainMs = opts.drainIntervalMs ?? 50;
+  const dirs = new DirectoryClassifier(opts.root, initialInventory);
+  const drainOnce = (): boolean => {
+    if (!lib || !ctx) return false;
+    let ab: ArrayBuffer;
+    try {
+      ab = lib.drain(ctx, 1024);
+    } catch {
+      return false;
+    }
+    if (ab.byteLength === 0) return false;
+    for (const slot of decodeSlots(new Uint8Array(ab))) {
+      const ev = slot.event;
+      if (ev.observedPath) {
+        ev.observedPath = relativize(opts.root, ev.observedPath);
+        // Lifecycles are per file: drop activity on the root itself
+        // and on directories beneath it.
+        if (dirs.isDirectory(ev.observedPath)) continue;
+      }
+      ev.sourceEventIndex = events.length;
+      events.push(ev);
+      safeCall(opts.live?.onEvent, ev);
+      if (slot.usn && ev.timestamp_ns !== undefined) {
+        usnRecords.push({
+          fileReferenceNumber: slot.usn.fileReferenceNumber,
+          parentFileReferenceNumber: slot.usn.parentFileReferenceNumber,
+          usn: slot.usn.usn,
+          timestamp_ns: ev.timestamp_ns,
+          reason: slot.usn.reason,
+          fileName: ev.observedPath?.split("\\").pop() ?? "",
+          fileId128: null,
+        });
+      }
+    }
+    return true;
+  };
   let stopped = false;
   const onAbort = () => {
     stopped = true;
@@ -173,31 +351,7 @@ export async function runCapture(opts: CaptureOptions): Promise<CaptureResult> {
     const deadline = Date.now() + opts.seconds * 1000;
     while (!stopped && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, drainMs));
-      if (lib && ctx && (etwAvailable || usnAvailable)) {
-        let ab: ArrayBuffer;
-        try {
-          ab = lib.drain(ctx, 1024);
-        } catch {
-          break;
-        }
-        for (const slot of decodeSlots(new Uint8Array(ab))) {
-          const ev = slot.event;
-          if (ev.observedPath) ev.observedPath = relativize(opts.root, ev.observedPath);
-          ev.sourceEventIndex = events.length;
-          events.push(ev);
-          if (slot.usn && ev.timestamp_ns !== undefined) {
-            usnRecords.push({
-              fileReferenceNumber: slot.usn.fileReferenceNumber,
-              parentFileReferenceNumber: slot.usn.parentFileReferenceNumber,
-              usn: slot.usn.usn,
-              timestamp_ns: ev.timestamp_ns,
-              reason: slot.usn.reason,
-              fileName: ev.observedPath?.split("\\").pop() ?? "",
-              fileId128: null,
-            });
-          }
-        }
-      }
+      if (etwAvailable || usnAvailable) drainOnce();
     }
   } finally {
     watcher.stop();
@@ -227,6 +381,12 @@ export async function runCapture(opts: CaptureOptions): Promise<CaptureResult> {
         usnRecordsRead = Number(lib.usnRecordsRead(ctx));
         usnDropped = Number(lib.usnDroppedUnresolved(ctx));
       }
+      // Producers are stopped: flush what is still in the ring.
+      if (etwAvailable || usnAvailable) {
+        for (let i = 0; i < 1024 && drainOnce(); i++) {
+          /* keep draining */
+        }
+      }
     } finally {
       try {
         lib.closeSession(ctx);
@@ -248,6 +408,7 @@ export async function runCapture(opts: CaptureOptions): Promise<CaptureResult> {
     events.push(e);
   }
   events.sort((a, b) => (a.timestamp_ns < b.timestamp_ns ? -1 : a.timestamp_ns > b.timestamp_ns ? 1 : 0));
+  attachFileKeys(events, initialInventory, finalInventory, opts.root);
 
   const manifest: Omit<Manifest, "hashes"> = {
     schemaVersion: 1,

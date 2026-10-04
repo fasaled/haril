@@ -51,7 +51,8 @@ function tokenize(s: string): string[] {
     if (quote) {
       if (ch === quote) {
         quote = null;
-      } else if (ch === "\\" && i + 1 < s.length) {
+      } else if (ch === "\\" && i + 1 < s.length && (s[i + 1] === quote || s[i + 1] === "\\")) {
+        // Only `\"` and `\\` are escapes, so Windows paths survive quoting.
         cur += s[i + 1];
         i += 2;
         continue;

@@ -10,7 +10,7 @@
  * converts JS strings to UTF-16LE on the way in.
  *
  * Capture happens via a producer/consumer ring buffer: ETW and USN
- * producer threads push 256-byte slots; the JS consumer calls
+ * producer threads push HARIL_SLOT_SIZE-byte slots; the JS consumer calls
  * `haril_drain` to pop a batch.
  */
 
@@ -80,7 +80,17 @@ HARIL_EXPORT int32_t haril_is_admin(void);
 HARIL_EXPORT int32_t haril_relaunch_elevated(const uint16_t* exe_utf16, int32_t exe_len,
                                               const uint16_t* args_utf16, int32_t args_len);
 
-#define HARIL_SLOT_SIZE 256
+/* Slot layout: see packages/core/src/ffi/ring_consumer.ts. The full
+ * observed path (DOS form, up to HARIL_SLOT_PATH_CHARS UTF-16 units)
+ * lives at [256..1024). */
+#define HARIL_SLOT_SIZE 1024
+#define HARIL_SLOT_PATH_OFFSET 256
+#define HARIL_SLOT_PATH_CHARS 384
+#define HARIL_SLOT_PROC_OFFSET 112
+#define HARIL_SLOT_PROC_CHARS 32
+/* A record is a head slot plus up to 64 continuation slots (32767-unit
+ * path); haril_drain needs room for at least one whole record. */
+#define HARIL_MAX_RECORD_SLOTS 65
 HARIL_EXPORT int32_t haril_drain(HarilContext* ctx,
                                  uint8_t* out_buf,
                                  int32_t max_slots,

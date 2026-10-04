@@ -225,7 +225,7 @@ napi_value drain_js(napi_env env, napi_callback_info info) {
 
     int32_t maxSlots = 1024;
     napi_get_value_int32(env, argv[1], &maxSlots);
-    if (maxSlots <= 0) maxSlots = 1;
+    if (maxSlots < HARIL_MAX_RECORD_SLOTS) maxSlots = HARIL_MAX_RECORD_SLOTS;
 
     const std::size_t out_bytes = static_cast<std::size_t>(maxSlots) * HARIL_SLOT_SIZE;
     std::vector<std::uint8_t> tmp(out_bytes);
@@ -477,5 +477,9 @@ NAPI_MODULE_INIT() {
     const char* version = "0.1.0";
     napi_create_string_utf8(env, version, NAPI_AUTO_LENGTH, &version_str);
     napi_set_named_property(env, exports, "version", version_str);
+
+    napi_value slot_size = nullptr;
+    napi_create_int32(env, HARIL_SLOT_SIZE, &slot_size);
+    napi_set_named_property(env, exports, "slotSize", slot_size);
     return exports;
 }

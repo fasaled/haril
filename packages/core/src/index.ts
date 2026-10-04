@@ -24,17 +24,19 @@ export type { PackageContents } from "./package/reader.ts";
 
 export { parseCommand, formatCommand } from "./commands/parse.ts";
 export type { ParsedCommand } from "./commands/parse.ts";
-export { complete, KNOWN_COMMANDS, FLAG_VALUES } from "./commands/complete.ts";
+export { CommandQueue, type QueuedCommand } from "./commands/queue.ts";
+export { complete, KNOWN_COMMANDS, FLAG_VALUES, getVisibleSuggestionsWindow, applyCompletion } from "./commands/complete.ts";
 export type {
   Completion,
   CompleteContext,
   CompletionKind,
+  VisibleSuggestionsWindow,
 } from "./commands/complete.ts";
 
 export { FileTimelineCommands, FILE_TIMELINE_PAGE_SIZE, FILE_TIMELINE_EVENTS_PER_FILE } from "./commands/file_timeline.ts";
 
-export { HarilSession, createSession, bindSession } from "./session.ts";
-export type { SessionSnapshot, StartCaptureArgs } from "./session.ts";
+export { HarilSession, createSession, bindSession, LIVE_EVENT_TAIL, defaultCaptureFileName } from "./session.ts";
+export type { SessionSnapshot, StartCaptureArgs, LiveCaptureState, LiveEvent, LiveFile } from "./session.ts";
 
 export { limits } from "./limits.ts";
 
