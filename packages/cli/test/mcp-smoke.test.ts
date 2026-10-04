@@ -46,14 +46,16 @@ if (IS_NATIVE_AVAILABLE) {
         { jsonrpc: "2.0", method: "notifications/initialized" },
         { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
         { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_session_activity_overview", arguments: {} } },
+        { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "list_observed_directories", arguments: { offset: 0, limit: 10 } } },
+        { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "browse_file_timelines", arguments: { directory: "\\", offset: 0, limit: 10 } } },
       ];
 
       await new Promise<void>((resolve, reject) => {
         function checkDone() {
           const lines = out.join("").split("\n").filter((l) => l.trim());
           const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-          // Expect responses for id 1, 2, 3
-          if (parsed.some((p: any) => p.id === 3)) {
+          // Expect responses for id 1, 2, 3, 4, 5
+          if (parsed.some((p: any) => p.id === 5)) {
             cleanup();
             resolve();
           }
@@ -84,7 +86,7 @@ if (IS_NATIVE_AVAILABLE) {
         // Give process a moment to initialize before pumping requests
         setTimeout(sendNext, 300);
       });
-    });
+    }, 30000);
   });
 } else {
   // Module-level: mark the describe as skipped

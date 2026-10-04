@@ -133,7 +133,7 @@ Inside the TUI:
   TUI shortcuts:
     :  \\  s  v  c  h  ?  n N  o f p e r  Ctrl+Q
 
-Project: see README.md and C:\\Users\\francisco\\.opencode\\plan\\haril-ts.md`);
+Project: see README.md and docs/`);
 }
 
 main().catch((err) => {

@@ -26,19 +26,20 @@ export const LiveCapturePanel: React.FC<LiveCapturePanelProps> = ({ snapshot, is
   }, [elapsed]);
 
   const sourceStatus = snapshot.sourceStatus;
-  const etw = sourceStatus.etw;
-  const usn = sourceStatus.usn;
-  const fsw = sourceStatus.fsw;
+  const manifest = snapshot.packageManifest;
+  const etwSource = manifest?.sources.etw;
+  const usnSource = manifest?.sources.usn;
+  const fswSource = manifest?.sources.fsw;
 
-  const etwStatus = etw.available 
-    ? `ETW: ${etw.eventsObserved?.toLocaleString() || 0} events`
-    : `ETW: off (rc=${etw.startRc ?? "n/a"})`;
-  const usnStatus = usn.available 
-    ? `USN: ${usn.recordsRead?.toLocaleString() || 0} records`
-    : `USN: off (rc=${usn.startRc ?? "n/a"})`;
-  const fswStatus = `FSW: ${fsw.notifications || 0} notifications`;
+  const etwStatus = sourceStatus.etw
+    ? `ETW: ${etwSource ? etwSource.eventsObserved.toLocaleString() : "active"} events`
+    : `ETW: off (rc=${etwSource?.startRc ?? "n/a"})`;
+  const usnStatus = sourceStatus.usn
+    ? `USN: ${usnSource ? usnSource.recordsRead.toLocaleString() : "active"} records`
+    : `USN: off (rc=${usnSource?.startRc ?? "n/a"})`;
+  const fswStatus = `FSW: ${fswSource ? fswSource.notifications : (sourceStatus.fsw ? "active" : "off")} notifications`;
 
-  const captureInfo = snapshot.packageManifest?.sources;
+  const counts = manifest?.recordCounts;
 
   return (
     <InkBox flexDirection="column" borderStyle="round" borderColor={isFocused ? "green" : "gray"} width="100%" height="100%">
@@ -47,7 +48,7 @@ export const LiveCapturePanel: React.FC<LiveCapturePanelProps> = ({ snapshot, is
           {isFocused ? " LIVE CAPTURE (focused) " : " LIVE CAPTURE "}
         </Text>
       </Box>
-      
+
       <Box flexDirection="column" marginLeft={1} marginTop={1}>
         <Text color="yellow">⏱  {elapsedStr}</Text>
         <Text>{"  " + etwStatus}</Text>
@@ -55,20 +56,20 @@ export const LiveCapturePanel: React.FC<LiveCapturePanelProps> = ({ snapshot, is
         <Text>{"  " + fswStatus}</Text>
       </Box>
 
-      {captureInfo && (
-        <Box marginTop={1} marginLeft={1}>
+      {counts && (
+        <Box flexDirection="column" marginTop={1} marginLeft={1}>
           <Text color="cyan">Capture Summary:</Text>
           <Text dimColor>
-            {"  Events: " + (captureInfo.recordCounts?.events ?? 0).toLocaleString()}
+            {"  Events: " + (counts.events ?? 0).toLocaleString()}
           </Text>
           <Text dimColor>
-            {"  Inventories: " + (captureInfo.recordCounts?.inventories ?? 0).toLocaleString()}
+            {"  Inventories: " + (counts.inventories ?? 0).toLocaleString()}
           </Text>
           <Text dimColor>
-            {"  USN: " + (captureInfo.recordCounts?.usn ?? 0).toLocaleString()}
+            {"  USN: " + (counts.usn ?? 0).toLocaleString()}
           </Text>
           <Text dimColor>
-            {"  Notifications: " + (captureInfo.recordCounts?.notifications ?? 0).toLocaleString()}
+            {"  Notifications: " + (counts.notifications ?? 0).toLocaleString()}
           </Text>
         </Box>
       )}

@@ -67,6 +67,7 @@ public:
 
     bool push(std::span<const std::uint8_t> data) noexcept {
         if (data.size() > HARIL_SLOT_SIZE) return false;
+        std::lock_guard<std::mutex> lk(push_mutex_);
         const auto h = head_.v.load(std::memory_order_relaxed);
         const auto t = tail_.v.load(std::memory_order_acquire);
         if (h - t >= kRingCapacity) return false;
@@ -99,6 +100,7 @@ public:
 
 private:
     std::uint8_t* storage_ = nullptr;
+    std::mutex push_mutex_;
     PaddedAtomic head_;
     PaddedAtomic tail_;
     std::atomic<std::uint64_t> seq_high_{0};

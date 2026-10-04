@@ -20,6 +20,7 @@ import { importPackageIntoStore } from "./store/import.ts";
 import { FileTimelineCommands } from "./commands/file_timeline.ts";
 import { parseCommand, type ParsedCommand } from "./commands/parse.ts";
 import { runCapture } from "./capture/capture.ts";
+import { fileKeyHash } from "./model/fileKey.ts";
 import type { CommandResult, EventFilter, FileKey, Phase } from "./model/types.ts";
 
 export interface StartCaptureArgs {
@@ -233,6 +234,8 @@ export class HarilSession {
       case "ls":
         return this.commands.browseFileTimelines({
           directory: cmd.positional[0] ?? this._cwd,
+          offset: cmd.flags["offset"] != null ? parseInt(String(cmd.flags["offset"]), 10) : undefined,
+          limit: cmd.flags["limit"] != null ? parseInt(String(cmd.flags["limit"]), 10) : undefined,
           pathPattern: typeof cmd.flags["pattern"] === "string" ? cmd.flags["pattern"] : undefined,
           identityKind: this.parseIdentityKind(cmd.flags["identity"]),
         });
@@ -262,14 +265,31 @@ export class HarilSession {
         }
         if (Object.keys(filter).length > 0) this._activeFilter = filter;
         if (!target) return { ok: false, kind: "error", error: "events requires a fileKey or path; select a file first" };
-        return this.commands.inspectFileTimeline({ fileKeyHash: target, filter: this._activeFilter ?? undefined });
+        const offset = cmd.flags["offset"] != null ? parseInt(String(cmd.flags["offset"]), 10) : undefined;
+        const limit = cmd.flags["limit"] != null ? parseInt(String(cmd.flags["limit"]), 10) : undefined;
+        return this.commands.inspectFileTimeline({ fileKeyHash: target, offset, limit, filter: this._activeFilter ?? undefined });
       }
       case "evidence": {
-        const id = parseInt(cmd.positional[0] ?? "", 10);
-        if (!Number.isFinite(id)) return { ok: false, kind: "error", error: "evidence requires an event id" };
-        const hash = this._selectedFileKey ? hashKey(this._selectedFileKey) : "";
-        if (!hash) return { ok: false, kind: "error", error: "no file selected" };
-        return this.commands.inspectFileTimelineEvent({ fileKeyHash: hash, eventIndex: id });
+        let hash: string | null = null;
+        let eventId: number;
+
+        if (cmd.positional.length >= 2) {
+          hash = this.resolveTarget(cmd.positional[0]);
+          eventId = parseInt(cmd.positional[1] ?? "", 10);
+        } else {
+          eventId = parseInt(cmd.positional[0] ?? "", 10);
+          hash = typeof cmd.flags["file"] === "string" ? this.resolveTarget(cmd.flags["file"]) : this.resolveTarget();
+        }
+
+        if (!Number.isFinite(eventId)) {
+          return { ok: false, kind: "error", error: "evidence requires an event id" };
+        }
+        if (!hash) {
+          const row = this.store.getEventById(eventId);
+          if (!row) return { ok: false, kind: "error", error: `event id ${eventId} not found` };
+          return { ok: true, kind: "json", data: row };
+        }
+        return this.commands.inspectFileTimelineEvent({ fileKeyHash: hash, eventIndex: eventId });
       }
       case "summary": {
         const target = this.resolveTarget(cmd.positional[0]);
@@ -279,12 +299,17 @@ export class HarilSession {
       case "search": {
         const text = cmd.positional[0];
         if (!text) return { ok: false, kind: "error", error: "search requires a text argument" };
-        return this.commands.searchFileTimelines({ text });
+        const offset = cmd.flags["offset"] != null ? parseInt(String(cmd.flags["offset"]), 10) : undefined;
+        const limit = cmd.flags["limit"] != null ? parseInt(String(cmd.flags["limit"]), 10) : undefined;
+        return this.commands.searchFileTimelines({ text, offset, limit });
       }
       case "overview":
         return this.commands.getSessionActivityOverview();
-      case "dirs":
-        return this.commands.listObservedDirectories({});
+      case "dirs": {
+        const offset = cmd.flags["offset"] != null ? parseInt(String(cmd.flags["offset"]), 10) : undefined;
+        const limit = cmd.flags["limit"] != null ? parseInt(String(cmd.flags["limit"]), 10) : undefined;
+        return this.commands.listObservedDirectories({ offset, limit });
+      }
       case "size-changes":
         return this.commands.getFileSizeChanges({});
       case "capture":
@@ -316,8 +341,14 @@ export class HarilSession {
   }
 
   private resolveTarget(arg?: string): string | null {
-    if (arg) return arg;
-    if (this._selectedFileKey) return hashKey(this._selectedFileKey);
+    if (arg) {
+      if (!arg.startsWith("exact:") && !arg.startsWith("path:")) {
+        const found = this.store.getFileByPath(arg);
+        if (found) return found.fileKeyHash;
+      }
+      return arg;
+    }
+    if (this._selectedFileKey) return fileKeyHash(this._selectedFileKey);
     return null;
   }
 
@@ -358,13 +389,6 @@ export class HarilSession {
       ].join("\n"),
     };
   }
-}
-
-function hashKey(key: FileKey): string {
-  if (key.kind === "exact") {
-    return "exact:" + key.volumeSerial.toString(16) + ":" + Array.from(key.fileId128).map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
-  return "path:" + key.root + "\\" + key.path;
 }
 
 export async function createSession(opts: { phase?: Phase; tempDir?: string } = {}): Promise<HarilSession> {

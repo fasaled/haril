@@ -19,7 +19,9 @@ export const EventDetail: React.FC<EventDetailProps> = ({ event, fileKey, isFocu
             {isFocused ? " EVENT DETAILS (focused) " : " EVENT DETAILS "}
           </Text>
         </Box>
-        <Text dimColor marginLeft={1} marginTop={1}>Select an event to view details</Text>
+        <Box marginLeft={1} marginTop={1}>
+          <Text dimColor>Select an event to view details</Text>
+        </Box>
       </InkBox>
     );
   }
@@ -87,10 +89,12 @@ export const EventDetail: React.FC<EventDetailProps> = ({ event, fileKey, isFocu
       </Box>
       <Box flexDirection="column" flexGrow={1} marginLeft={1} marginTop={1}>
         {sections.map((section, si) => (
-          <Box key={si} marginBottom={1}>
+          <Box key={si} flexDirection="column" marginBottom={1}>
             <Text color="cyan" bold>{section.title}</Text>
             {section.lines.map((line, li) => (
-              <Text key={li} dimColor marginLeft={2}>{line}</Text>
+              <Box key={li} marginLeft={2}>
+                <Text dimColor>{line}</Text>
+              </Box>
             ))}
           </Box>
         ))}

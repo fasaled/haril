@@ -142,25 +142,36 @@ export function mergedLaneEvents(
   rootLane: FileTimelineLane,
 ): NormalizedEvent[] {
   const out: NormalizedEvent[] = [...rootLane.events];
-  const seen = new Set<number>([rootLane.events[0] ? 0 : -1]);
-  const queue: HeuristicBridge[] = annotated
-    .find((a) => a.lane === rootLane)
-    ?.bridges.slice() ?? [];
+  const seenLanes = new Set<FileTimelineLane>([rootLane]);
+  const queue: HeuristicBridge[] = (
+    annotated.find((a) => a.lane === rootLane)?.bridges ?? []
+  ).slice();
+
   while (queue.length > 0) {
     const b = queue.shift()!;
-    if (seen.has(b.toIndex)) continue;
-    seen.add(b.toIndex);
-    out.push(b.toLane.events[b.toIndex]!);
+    if (seenLanes.has(b.toLane)) continue;
+    seenLanes.add(b.toLane);
+    out.push(...b.toLane.events);
     const more = annotated.find((a) => a.lane === b.toLane)?.bridges ?? [];
     queue.push(...more);
   }
-  // Stable order: by timestamp_ns.
-  out.sort((a, b) => {
+
+  // Deduplicate events if an event was present in multiple merged paths
+  const uniqueEvents = new Map<string, NormalizedEvent>();
+  for (const ev of out) {
+    const key = `${ev.timestamp_ns}:${ev.eventKind}:${ev.pid}:${ev.sourceEventIndex}`;
+    if (!uniqueEvents.has(key)) {
+      uniqueEvents.set(key, ev);
+    }
+  }
+
+  const result = Array.from(uniqueEvents.values());
+  result.sort((a, b) => {
     if (a.timestamp_ns < b.timestamp_ns) return -1;
     if (a.timestamp_ns > b.timestamp_ns) return 1;
     return 0;
   });
-  return out;
+  return result;
 }
 
 function laneIndex<T>(arr: T[], target: T): number {

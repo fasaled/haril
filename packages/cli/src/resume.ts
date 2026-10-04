@@ -4,12 +4,12 @@
  */
 
 import { readFileSync, existsSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import type { HarilSession, StartCaptureArgs } from "@haril-ts/core";
 
 function pendingPath(): string {
-  const appdata = process.env["LOCALAPPDATA"] ?? join(tmpdir(), "Haril");
+  const appdata = process.env["LOCALAPPDATA"] ?? tmpdir();
   return join(appdata, "Haril", "pending-session.json");
 }
 
@@ -50,7 +50,7 @@ export interface WritePendingOptions {
 
 export function writePendingSession(opts: WritePendingOptions): void {
   const path = pendingPath();
-  const dir = path.substring(0, path.lastIndexOf("\\"));
+  const dir = dirname(path);
   try {
     mkdirSync(dir, { recursive: true });
   } catch {

@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Box, Text, useInput, useApp } from "ink";
-import type { HarilSession, SessionSnapshot, InventoryEntry, NormalizedEvent, FileKey, EventKind, Phase } from "@haril-ts/core";
+import type { HarilSession, SessionSnapshot, NormalizedEvent, EventKind, Phase } from "@haril-ts/core";
 import { Header } from "./components/Header.tsx";
 import { Prompt } from "./components/Prompt.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { HelpOverlay } from "./components/HelpOverlay.tsx";
 import { ActivityPanel } from "./components/ActivityPanel.tsx";
-import { FileBrowser } from "./components/FileBrowser.tsx";
+import { FileBrowser, type FileItem } from "./components/FileBrowser.tsx";
 import { EventList } from "./components/EventList.tsx";
 import { EventDetail } from "./components/EventDetail.tsx";
 import { LiveCapturePanel } from "./components/LiveCapturePanel.tsx";
@@ -29,36 +29,30 @@ export const App: React.FC<AppProps> = ({ session }) => {
   const [snap, setSnap] = useState<SessionSnapshot>(() => session.snapshot());
 
   // File browser state
-  const [files, setFiles] = useState<InventoryEntry[]>([]);
+  const [files, setFiles] = useState<FileItem[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
-  const [selectedFileKey, setSelectedFileKey] = useState<FileKey | null>(null);
+  const [selectedFileKeyHash, setSelectedFileKeyHash] = useState<string | null>(null);
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
-  const [fileScrollOffset, setFileScrollOffset] = useState(0);
 
   // Event list state
   const [events, setEvents] = useState<NormalizedEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [selectedEventIndex, setSelectedEventIndex] = useState(0);
   const [selectedEvent, setSelectedEvent] = useState<NormalizedEvent | null>(null);
-  const [eventScrollOffset, setEventScrollOffset] = useState(0);
 
   // Event filter state
   const [eventFilter, setEventFilter] = useState<{ kinds?: EventKind[]; failedOnly?: boolean; pid?: number; process?: string; reset?: boolean }>({});
-  const [showEventFilterMenu, setShowEventFilterMenu] = useState(false);
 
   // UI state
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [activityOpen, setActivityOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [lastExit, setLastExit] = useState(false);
   const [focusedPanel, setFocusedPanel] = useState<"files" | "events" | "detail" | "prompt" | "help">("prompt");
-  const [liveElapsed, setLiveElapsed] = useState(0);
 
   // useInput hook for TUI key handling
   useInput((input, key) => {
     // Global keys
     if (key.ctrl && input === "q") {
-      setLastExit(true);
       exit();
       return;
     }
@@ -66,11 +60,7 @@ export const App: React.FC<AppProps> = ({ session }) => {
       setHelpOpen(v => !v);
       return;
     }
-    if (input === ":") {
-      setFocusedPanel("prompt");
-      return;
-    }
-    if (input === "\\") {
+    if (input === ":" || input === "\\") {
       setFocusedPanel("prompt");
       return;
     }
@@ -95,7 +85,7 @@ export const App: React.FC<AppProps> = ({ session }) => {
     if (focusedPanel === "files") {
       if (key.upArrow || (input === "k" && (key.ctrl || key.meta))) handleFileNavigate("up");
       if (key.downArrow || (input === "j" && (key.ctrl || key.meta))) handleFileNavigate("down");
-      if (key.home || (input === "g" && key.g)) handleFileNavigate("first");
+      if (key.home || input === "g") handleFileNavigate("first");
       if (key.end || (input === "G" && key.shift)) handleFileNavigate("last");
       if (key.pageUp) handleFileNavigate("pageUp");
       if (key.pageDown) handleFileNavigate("pageDown");
@@ -103,31 +93,22 @@ export const App: React.FC<AppProps> = ({ session }) => {
         const filtered = getFilteredFiles();
         const entry = filtered[selectedFileIndex];
         if (entry) {
-          const key: FileKey = entry.fileId128 && entry.volumeSerial
-            ? { kind: "exact", volumeSerial: entry.volumeSerial, fileId128: entry.fileId128 }
-            : { kind: "path", root: "", path: entry.path };
-          setSelectedFileKey(key);
-          loadEventsForKey(key);
+          setSelectedFileKeyHash(entry.fileKeyHash);
+          loadEventsForKey(entry.fileKeyHash);
         }
-      }
-      if (input === "/") {
-        return;
       }
     }
 
     if (focusedPanel === "events") {
       if (key.upArrow || (input === "k" && (key.ctrl || key.meta))) handleEventNavigate("up");
       if (key.downArrow || (input === "j" && (key.ctrl || key.meta))) handleEventNavigate("down");
-      if (key.home || (input === "g" && key.g)) handleEventNavigate("first");
+      if (key.home || input === "g") handleEventNavigate("first");
       if (key.end || (input === "G" && key.shift)) handleEventNavigate("last");
       if (key.pageUp) handleEventNavigate("pageUp");
       if (key.pageDown) handleEventNavigate("pageDown");
       if (key.return) {
         const filtered = getFilteredEvents();
         setSelectedEvent(filtered[selectedEventIndex] || null);
-      }
-      if (input === "/") {
-        return;
       }
       if (input === "f") {
         setEventFilter({ kinds: [] });
@@ -151,16 +132,7 @@ export const App: React.FC<AppProps> = ({ session }) => {
       }
       return;
     }
-  }, []);
-
-  // Live capture timer
-  useEffect(() => {
-    if (snap.phase === "live-capture") {
-      const id = setInterval(() => setLiveElapsed(e => e + 1), 1000);
-      return () => clearInterval(id);
-    }
-    setLiveElapsed(0);
-  }, [snap.phase]);
+  });
 
   // Update snapshot
   useEffect(() => {
@@ -194,11 +166,8 @@ export const App: React.FC<AppProps> = ({ session }) => {
 
     const entry = filtered[newIndex];
     if (entry) {
-      const key: FileKey = entry.fileId128 && entry.volumeSerial
-        ? { kind: "exact", volumeSerial: entry.volumeSerial, fileId128: entry.fileId128 }
-        : { kind: "path", root: "", path: entry.path };
-      setSelectedFileKey(key);
-      loadEventsForKey(key);
+      setSelectedFileKeyHash(entry.fileKeyHash);
+      loadEventsForKey(entry.fileKeyHash);
     }
   };
 
@@ -247,15 +216,13 @@ export const App: React.FC<AppProps> = ({ session }) => {
     setFileLoading(true);
     try {
       const result = await session.run("ls");
-      if (result.ok && result.kind === "json" && Array.isArray(result.data)) {
-        setFiles(result.data);
-        if (result.data.length > 0 && !selectedFileKey) {
-          const entry = result.data[0];
-          const key: FileKey = entry.fileId128 && entry.volumeSerial
-            ? { kind: "exact", volumeSerial: entry.volumeSerial, fileId128: entry.fileId128 }
-            : { kind: "path", root: "", path: entry.path };
-          setSelectedFileKey(key);
-          loadEventsForKey(key);
+      if (result.ok && result.kind === "json" && result.data && typeof result.data === "object") {
+        const items: FileItem[] = Array.isArray(result.data) ? (result.data as any) : ((result.data as any).items ?? []);
+        setFiles(items);
+        if (items.length > 0 && !selectedFileKeyHash) {
+          const entry = items[0]!;
+          setSelectedFileKeyHash(entry.fileKeyHash);
+          loadEventsForKey(entry.fileKeyHash);
         }
       }
     } catch (e) {
@@ -265,24 +232,15 @@ export const App: React.FC<AppProps> = ({ session }) => {
     }
   };
 
-  const loadEventsForKey = async (key: FileKey) => {
+  const loadEventsForKey = async (target: string) => {
     setEventsLoading(true);
     try {
-      const filter: any = {};
-      if (eventFilter.kinds?.length) filter.opKinds = eventFilter.kinds;
-      if (eventFilter.failedOnly) filter.failedOnly = true;
-      if (eventFilter.pid != null) filter.pid = eventFilter.pid;
-      if (eventFilter.process) filter.processName = eventFilter.process;
-
-      const keyStr = key.kind === "exact"
-        ? `exact:${key.volumeSerial.toString(16)}:${Array.from(key.fileId128).map(b => b.toString(16).padStart(2, "0")).join("")}`
-        : `path:${key.path}`;
-
-      const result = await session.run(`events ${keyStr}`);
-      if (result.ok && result.kind === "json" && Array.isArray(result.data)) {
-        setEvents(result.data);
+      const result = await session.run(`events ${target}`);
+      if (result.ok && result.kind === "json" && result.data && typeof result.data === "object") {
+        const items: NormalizedEvent[] = Array.isArray(result.data) ? (result.data as any) : ((result.data as any).items ?? []);
+        setEvents(items);
         setSelectedEventIndex(0);
-        setSelectedEvent(result.data[0] || null);
+        setSelectedEvent(items[0] || null);
       }
     } catch (e) {
       console.error("loadEvents error:", e);
@@ -309,7 +267,6 @@ export const App: React.FC<AppProps> = ({ session }) => {
     setActivity(cur => cur.map(e => e.id === id ? { ...e, ok: result.ok, text } : e));
 
     if ((result.data as any)?.action === "quit") {
-      setLastExit(true);
       exit();
       return;
     }
@@ -317,7 +274,7 @@ export const App: React.FC<AppProps> = ({ session }) => {
       await loadFiles();
     }
     if ((result.data as any)?.action === "close") {
-      setSelectedFileKey(null);
+      setSelectedFileKeyHash(null);
       setEvents([]);
     }
     setSnap(session.snapshot());
@@ -333,24 +290,21 @@ export const App: React.FC<AppProps> = ({ session }) => {
   // Phase-specific render functions
   function renderEmptyPhase() {
     return (
-      <Box flexDirection="column" width="100%" height="100%">
+      <Box flexDirection="column" width="100%" flexGrow={1}>
         <Header snapshot={snap} />
+        <Box width="100%" borderStyle="single" borderColor="gray" paddingX={1}>
+          <Text backgroundColor="gray" color="white">
+            {snap.packagePath ? `Package: ${snap.packagePath}` : "No package loaded"}
+          </Text>
+        </Box>
         <Box flexDirection="row" flexGrow={1}>
-          {/* Horizontal document selector at top */}
-          <Box width="100%" height="40" marginRight={1} marginBottom={1} borderStyle="single" borderColor="gray">
-            <Text backgroundColor="gray" color="white">
-              {snap.packagePath ? `Package: ${snap.packagePath}` : "No package loaded"}
-            </Text>
-          </Box>
-
-          {/* File browser area - shows files/entries */}
-          <Box width="30%" height="calc(100% - 41px)" marginRight={1} minWidth={40} borderStyle="single" borderColor="gray">
+          <Box width="35%" minWidth={30} borderStyle="single" borderColor="gray">
             <FileBrowser
               entries={files}
-              selectedKey={selectedFileKey}
-              onSelect={(key) => {
-                setSelectedFileKey(key);
-                loadEventsForKey(key);
+              selectedKeyHash={selectedFileKeyHash}
+              onSelect={(entry) => {
+                setSelectedFileKeyHash(entry.fileKeyHash);
+                loadEventsForKey(entry.fileKeyHash);
               }}
               onNavigate={handleFileNavigate}
               isFocused={focusedPanel === "files"}
@@ -358,29 +312,12 @@ export const App: React.FC<AppProps> = ({ session }) => {
               loading={fileLoading}
             />
           </Box>
-
-          {/* Event list area - shows events for selected file */}
-          <Box width="70%" height="calc(100% - 41px)" minWidth={80} borderStyle="single" borderColor="gray">
-            {selectedFileKey ? (
-              <EventList
-                events={events}
-                fileKey={selectedFileKey}
-                selectedIndex={selectedEventIndex}
-                onSelect={(idx) => {
-                  setSelectedEventIndex(idx);
-                  setSelectedEvent(getFilteredEvents()[idx] || null);
-                }}
-                onNavigate={handleEventNavigate}
-                onFilter={(f) => setEventFilter(f)}
-                isFocused={focusedPanel === "events"}
-                filter={eventFilter}
-                loading={eventsLoading}
-              />
-            ) : (
-              <Text dimColor marginLeft={1} marginTop={2}>
-                Select a file from the browser to view its events
+          <Box width="65%" minWidth={40} borderStyle="single" borderColor="gray">
+            <Box marginLeft={1} marginTop={2}>
+              <Text dimColor>
+                Use 'open &lt;path.haril&gt;' or 'start-capture' to begin
               </Text>
-            )}
+            </Box>
           </Box>
         </Box>
         <StatusBar snapshot={snap} />
@@ -391,49 +328,25 @@ export const App: React.FC<AppProps> = ({ session }) => {
           phase={snap.phase}
         />
         {helpOpen && <HelpOverlay onClose={() => setHelpOpen(false)} />}
-
-
       </Box>
     );
   }
 
   function renderLiveCapturePhase() {
     return (
-      <Box flexDirection="column" width="100%" height="100%">
+      <Box flexDirection="column" width="100%" flexGrow={1}>
         <Header snapshot={snap} />
-        <Box flexDirection="row" flexGrow={1}>
-          {/* Horizontal document selector at top - shows current file during capture */}
-          <Box width="100%" height="40" marginRight={1} marginBottom={1} borderStyle="single" borderColor="green">
-            <Text backgroundColor="green" color="white">
-              {snap.packagePath ? `Live Capture: ${snap.packagePath}` : "Live Capture"}
-            </Text>
-          </Box>
-
-          {/* During live capture, show events with first file selected */}
-          <Box width="100%" height="calc(100% - 41px)" minWidth={80} borderStyle="single" borderColor="green">
-            {snap.phase === "live-capture" && selectedFileKey ? (
-              <LiveCapturePanel
-                snapshot={snap}
-                isFocused={focusedPanel === "detail"}
-                phase={snap.phase}
-              />
-            ) : (
-              <EventList
-                events={events}
-                fileKey={selectedFileKey}
-                selectedIndex={selectedEventIndex}
-                onSelect={(idx) => {
-                  setSelectedEventIndex(idx);
-                  setSelectedEvent(getFilteredEvents()[idx] || null);
-                }}
-                onNavigate={handleEventNavigate}
-                onFilter={(f) => setEventFilter(f)}
-                isFocused={focusedPanel === "events"}
-                filter={eventFilter}
-                loading={eventsLoading}
-              />
-            )}
-          </Box>
+        <Box width="100%" borderStyle="single" borderColor="green" paddingX={1}>
+          <Text backgroundColor="green" color="white">
+            {snap.packagePath ? `Live Capture: ${snap.packagePath}` : "Live Capture in progress"}
+          </Text>
+        </Box>
+        <Box width="100%" flexGrow={1} borderStyle="single" borderColor="green">
+          <LiveCapturePanel
+            snapshot={snap}
+            isFocused={focusedPanel === "detail"}
+            phase={snap.phase}
+          />
         </Box>
         <StatusBar snapshot={snap} />
         <Prompt
@@ -443,32 +356,27 @@ export const App: React.FC<AppProps> = ({ session }) => {
           phase={snap.phase}
         />
         {helpOpen && <HelpOverlay onClose={() => setHelpOpen(false)} />}
-
-
       </Box>
     );
   }
 
   function renderAnalyzePhase() {
     return (
-      <Box flexDirection="column" width="100%" height="100%">
+      <Box flexDirection="column" width="100%" flexGrow={1}>
         <Header snapshot={snap} />
+        <Box width="100%" borderStyle="single" borderColor="gray" paddingX={1}>
+          <Text backgroundColor="gray" color="white">
+            {snap.packagePath ? `Package: ${snap.packagePath}` : "No package loaded"}
+          </Text>
+        </Box>
         <Box flexDirection="row" flexGrow={1}>
-          {/* Horizontal document selector at top */}
-          <Box width="100%" height="40" marginRight={1} marginBottom={1} borderStyle="single" borderColor="gray">
-            <Text backgroundColor="gray" color="white">
-              {snap.packagePath ? `Package: ${snap.packagePath}` : "No package loaded"}
-            </Text>
-          </Box>
-
-          {/* File browser area */}
-          <Box width="30%" height="calc(100% - 41px)" marginRight={1} minWidth={40} borderStyle="single" borderColor="gray">
+          <Box width="35%" minWidth={30} borderStyle="single" borderColor="gray">
             <FileBrowser
               entries={files}
-              selectedKey={selectedFileKey}
-              onSelect={(key) => {
-                setSelectedFileKey(key);
-                loadEventsForKey(key);
+              selectedKeyHash={selectedFileKeyHash}
+              onSelect={(entry) => {
+                setSelectedFileKeyHash(entry.fileKeyHash);
+                loadEventsForKey(entry.fileKeyHash);
               }}
               onNavigate={handleFileNavigate}
               isFocused={focusedPanel === "files"}
@@ -476,13 +384,11 @@ export const App: React.FC<AppProps> = ({ session }) => {
               loading={fileLoading}
             />
           </Box>
-
-          {/* Event list area */}
-          <Box width="70%" height="calc(100% - 41px)" minWidth={80} borderStyle="single" borderColor="gray">
-            {selectedFileKey ? (
+          <Box width="45%" minWidth={40} borderStyle="single" borderColor="gray">
+            {selectedFileKeyHash ? (
               <EventList
                 events={events}
-                fileKey={selectedFileKey}
+                fileKey={null}
                 selectedIndex={selectedEventIndex}
                 onSelect={(idx) => {
                   setSelectedEventIndex(idx);
@@ -495,18 +401,18 @@ export const App: React.FC<AppProps> = ({ session }) => {
                 loading={eventsLoading}
               />
             ) : (
-              <Text dimColor marginLeft={1} marginTop={2}>
-                Select a file from the browser to view its events
-              </Text>
+              <Box marginLeft={1} marginTop={2}>
+                <Text dimColor>
+                  Select a file from the browser to view its events
+                </Text>
+              </Box>
             )}
           </Box>
-
-          {/* Event detail area - closable with Esc or Ctrl+D */}
-          <Box flexGrow={1} minWidth={40} borderStyle="single" borderColor="gray" marginLeft={1}>
+          <Box width="20%" minWidth={25} borderStyle="single" borderColor="gray">
             {selectedEvent ? (
               <EventDetail
                 event={selectedEvent}
-                fileKey={selectedFileKey}
+                fileKey={null}
                 isFocused={focusedPanel === "detail"}
                 onClose={() => {
                   setSelectedEvent(null);
@@ -514,9 +420,11 @@ export const App: React.FC<AppProps> = ({ session }) => {
                 }}
               />
             ) : (
-              <Text dimColor marginLeft={1} marginTop={1}>
-                Select an event to view details (Esc to close)
-              </Text>
+              <Box marginLeft={1} marginTop={1}>
+                <Text dimColor>
+                  Select an event to view details (Esc to close)
+                </Text>
+              </Box>
             )}
           </Box>
         </Box>
@@ -528,8 +436,6 @@ export const App: React.FC<AppProps> = ({ session }) => {
           phase={snap.phase}
         />
         {helpOpen && <HelpOverlay onClose={() => setHelpOpen(false)} />}
-
-
       </Box>
     );
   }

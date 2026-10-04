@@ -107,10 +107,13 @@ export class SqliteStore {
   }
 
   /** Insert or update a file row for a FileKey. */
-  private upsertFile(key: FileKey, timestamp_ns: bigint): void {
+  upsertFile(key: FileKey, timestamp_ns: bigint, observedPath?: string | null): void {
     const hash = fileKeyHash(key);
-    const existing = this.db.query("SELECT first_seen_ns FROM files WHERE file_key_hash = ?").get(hash) as { first_seen_ns: number } | null;
+    const existing = this.db
+      .query("SELECT first_seen_ns, path FROM files WHERE file_key_hash = ?")
+      .get(hash) as { first_seen_ns: number; path: string | null } | null;
     const firstSeenNs = existing ? existing.first_seen_ns : Number(timestamp_ns);
+    const filePath = existing?.path ?? observedPath ?? (key.kind === "path" ? key.path : null);
 
     if (key.kind === "exact") {
       const hi = Buffer.from(key.fileId128.slice(0, 8));
@@ -118,14 +121,17 @@ export class SqliteStore {
       this.db
         .query(
           `INSERT INTO files (file_key_hash, kind, volume_serial, file_id128_hi, file_id128_lo, root, path, first_seen_ns, last_seen_ns)
-           VALUES (?, 'exact', ?, ?, ?, NULL, NULL, ?, ?)
-           ON CONFLICT(file_key_hash) DO UPDATE SET last_seen_ns = MAX(last_seen_ns, excluded.last_seen_ns)`,
+           VALUES (?, 'exact', ?, ?, ?, NULL, ?, ?, ?)
+           ON CONFLICT(file_key_hash) DO UPDATE SET
+             last_seen_ns = MAX(last_seen_ns, excluded.last_seen_ns),
+             path = COALESCE(files.path, excluded.path)`,
         )
         .run(
           hash,
           Number(key.volumeSerial),
           hi,
           lo,
+          filePath,
           firstSeenNs,
           Number(timestamp_ns),
         );
@@ -134,15 +140,17 @@ export class SqliteStore {
         .query(
           `INSERT INTO files (file_key_hash, kind, volume_serial, file_id128_hi, file_id128_lo, root, path, first_seen_ns, last_seen_ns)
            VALUES (?, 'path', NULL, NULL, NULL, ?, ?, ?, ?)
-           ON CONFLICT(file_key_hash) DO UPDATE SET last_seen_ns = MAX(last_seen_ns, excluded.last_seen_ns)`,
+           ON CONFLICT(file_key_hash) DO UPDATE SET
+             last_seen_ns = MAX(last_seen_ns, excluded.last_seen_ns),
+             path = COALESCE(files.path, excluded.path)`,
         )
-        .run(hash, key.root, key.path, firstSeenNs, Number(timestamp_ns));
+        .run(hash, key.root, filePath, firstSeenNs, Number(timestamp_ns));
     }
   }
 
   /** Queue an event for batched insert. */
   enqueueEvent(ev: NormalizedEvent): void {
-    if (ev.fileKey) this.upsertFile(ev.fileKey, ev.timestamp_ns);
+    if (ev.fileKey) this.upsertFile(ev.fileKey, ev.timestamp_ns, ev.observedPath);
     this.batchBuffer.push(ev);
     if (this.batchBuffer.length >= this.batchSize) {
       this.flush();
@@ -212,6 +220,19 @@ export class SqliteStore {
           Number(e.observedAt),
           isInitial ? 1 : 0,
         );
+        if (e.fileId128 && e.volumeSerial != null) {
+          this.upsertFile(
+            { kind: "exact", volumeSerial: e.volumeSerial, fileId128: e.fileId128 },
+            e.observedAt,
+            e.path,
+          );
+        } else {
+          this.upsertFile(
+            { kind: "path", root: "", path: e.path },
+            e.observedAt,
+            e.path,
+          );
+        }
       }
     });
     tx(entries);
@@ -260,11 +281,7 @@ export class SqliteStore {
     this.db.exec(`
       INSERT INTO size_changes (file_key_hash, initial_length, final_length, initial_path, final_path)
       SELECT
-        CASE
-          WHEN i1.file_id128_hi IS NOT NULL AND i1.file_id128_lo IS NOT NULL
-            THEN 'exact:' || COALESCE(i1.volume_serial, 0) || ':' || hex(i1.file_id128_hi) || hex(i1.file_id128_lo)
-          ELSE 'path::' || i1.path
-        END AS file_key_hash,
+        f.file_key_hash,
         i1.length AS initial_length,
         i2.length AS final_length,
         i1.path AS initial_path,
@@ -273,7 +290,8 @@ export class SqliteStore {
       JOIN inventory_entries i2
         ON i1.is_initial = 1 AND i2.is_initial = 0
         AND i1.path = i2.path
-      WHERE i1.file_id128_hi IS NOT NULL;
+      JOIN files f
+        ON f.path = i1.path;
     `);
   }
 
@@ -361,38 +379,20 @@ export class SqliteStore {
     }
 
     const sql = `
-      SELECT * FROM (
-        SELECT
-          f.file_key_hash AS fileKeyHash,
-          f.kind AS kind,
-          f.path AS path,
-          f.root AS root,
-          f.volume_serial AS volumeSerial,
-          CASE WHEN f.file_id128_hi IS NOT NULL AND f.file_id128_lo IS NOT NULL
-               THEN (f.file_id128_hi || f.file_id128_lo)
-               ELSE NULL END AS fileId128,
-          f.first_seen_ns AS firstSeenNs,
-          f.last_seen_ns AS lastSeenNs,
-          (SELECT COUNT(*) FROM events e WHERE e.file_key_hash = f.file_key_hash) AS eventCount
-        FROM files f
-        ${where}
-        UNION ALL
-        SELECT
-          'path::' || ie.path AS fileKeyHash,
-          'path' AS kind,
-          ie.path AS path,
-          NULL AS root,
-          ie.volume_serial AS volumeSerial,
-          CASE WHEN ie.file_id128_hi IS NOT NULL AND ie.file_id128_lo IS NOT NULL
-               THEN (ie.file_id128_hi || ie.file_id128_lo)
-               ELSE NULL END AS fileId128,
-          ie.observed_at_ns AS firstSeenNs,
-          ie.observed_at_ns AS lastSeenNs,
-          0 AS eventCount
-        FROM inventory_entries ie
-        WHERE NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.path = ie.path)
-          ${opts.pathPattern ? "AND ie.path LIKE ?" : ""}
-      )
+      SELECT
+        f.file_key_hash AS fileKeyHash,
+        f.kind AS kind,
+        f.path AS path,
+        f.root AS root,
+        f.volume_serial AS volumeSerial,
+        CASE WHEN f.file_id128_hi IS NOT NULL AND f.file_id128_lo IS NOT NULL
+             THEN (f.file_id128_hi || f.file_id128_lo)
+             ELSE NULL END AS fileId128,
+        f.first_seen_ns AS firstSeenNs,
+        f.last_seen_ns AS lastSeenNs,
+        (SELECT COUNT(*) FROM events e WHERE e.file_key_hash = f.file_key_hash) AS eventCount
+      FROM files f
+      ${where}
       ORDER BY eventCount DESC, path ASC
       LIMIT ? OFFSET ?`;
 
@@ -624,6 +624,44 @@ export class SqliteStore {
     const row = this.db
       .query<{ path: string | null; kind: string }, [string]>(`SELECT path, kind FROM files WHERE file_key_hash = ?`)
       .get(fileKeyHash);
+    return row ?? null;
+  }
+
+  getFileByPath(filePath: string): { fileKeyHash: string; path: string } | null {
+    const normalized = filePath.replace(/\//g, "\\");
+    const row = this.db
+      .query<{ fileKeyHash: string; path: string }, [string, string]>(
+        `SELECT file_key_hash AS fileKeyHash, path FROM files WHERE path = ? OR path LIKE ? LIMIT 1`,
+      )
+      .get(normalized, "%" + normalized);
+    return row ?? null;
+  }
+
+  getEventById(id: number): EventRow | null {
+    const row = this.db
+      .query<EventRow & Record<string, unknown>, [number]>(
+        `SELECT
+          e.id AS id,
+          e.timestamp_ns AS timestampNs,
+          e.event_kind AS eventKind,
+          e.file_key_hash AS fileKeyHash,
+          e.pid AS pid,
+          e.tid AS tid,
+          e.process_image_name AS processImageName,
+          e.irp_ptr AS irpPtr,
+          e.nt_status AS ntStatus,
+          e.observed_path AS observedPath,
+          e.byte_offset AS byteOffset,
+          e.byte_length AS byteLength,
+          e.share_access AS shareAccess,
+          e.create_options AS createOptions,
+          e.create_disposition AS createDisposition,
+          e.source AS source,
+          e.source_event_index AS sourceEventIndex
+        FROM events e
+        WHERE e.id = ?`,
+      )
+      .get(id);
     return row ?? null;
   }
 

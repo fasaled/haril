@@ -18,11 +18,11 @@ export interface ServeOptions {
 }
 
 export async function serveMcp(opts: ServeOptions): Promise<void> {
-  let session = await createSession();
+  const sessionHolder = { current: await createSession() };
 
   if (opts.packagePath) {
     try {
-      await openPackage(session, opts.packagePath);
+      await openPackage(sessionHolder.current, opts.packagePath);
     } catch (err) {
       // Surface the error via stderr so the agent can react.
       console.error("failed to open package:", err instanceof Error ? err.message : String(err));
@@ -31,14 +31,14 @@ export async function serveMcp(opts: ServeOptions): Promise<void> {
 
   const server = new McpServer({ name: "haril", version: "0.1.0" });
 
-  registerTools(server, session);
+  registerTools(server, sessionHolder);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   // The MCP server runs until the client closes stdin. Cleanup happens at exit.
-  process.on("SIGTERM", () => session.close());
-  process.on("SIGINT", () => session.close());
+  process.on("SIGTERM", () => sessionHolder.current.close());
+  process.on("SIGINT", () => sessionHolder.current.close());
 }
 
 async function openPackage(session: HarilSession, path: string): Promise<void> {
@@ -58,15 +58,15 @@ async function openPackage(session: HarilSession, path: string): Promise<void> {
   session.setPackage({ path, manifest: pkg.manifest });
 }
 
-function registerTools(server: McpServer, session: HarilSession): void {
+function registerTools(server: McpServer, holder: { current: HarilSession }): void {
   server.tool(
     "open_capture_package",
     "Open a .haril package. Replaces any open session.",
     { path: z.string().describe("absolute path to a .haril file") },
     async ({ path }) => {
       try {
-        await openPackage(session, path);
-        const snap = session.snapshot();
+        await openPackage(holder.current, path);
+        const snap = holder.current.snapshot();
         return {
           content: [
             {
@@ -89,8 +89,8 @@ function registerTools(server: McpServer, session: HarilSession): void {
     "Close the active package.",
     {},
     async () => {
-      session.close();
-      const fresh = createSession();
+      holder.current.close();
+      holder.current = await createSession();
       return { content: [{ type: "text", text: JSON.stringify({ ok: true }) }] };
     },
   );
@@ -100,7 +100,7 @@ function registerTools(server: McpServer, session: HarilSession): void {
     "Manifest summary for the active package.",
     {},
     async () => {
-      const snap = session.snapshot();
+      const snap = holder.current.snapshot();
       if (!snap.packageManifest) return toolError("no package is open");
       return {
         content: [
@@ -123,7 +123,7 @@ function registerTools(server: McpServer, session: HarilSession): void {
     "Session-wide factual totals and coverage.",
     {},
     async () => {
-      const res = await session.run("overview");
+      const res = await holder.current.run("overview");
       if (!res.ok) return toolError(res.error ?? "overview failed");
       return { content: [{ type: "text", text: JSON.stringify({ ok: true, data: res.data }) }] };
     },
@@ -134,7 +134,11 @@ function registerTools(server: McpServer, session: HarilSession): void {
     "List distinct directories with observed files.",
     { offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(1000).default(50) },
     async (args) => {
-      const res = await session.run("dirs");
+      const res = await holder.current.runCommand({
+        name: "dirs",
+        positional: [],
+        flags: { offset: String(args.offset), limit: String(args.limit) },
+      });
       if (!res.ok) return toolError(res.error ?? "dirs failed");
       return { content: [{ type: "text", text: JSON.stringify({ ok: true, data: res.data }) }] };
     },
@@ -144,8 +148,12 @@ function registerTools(server: McpServer, session: HarilSession): void {
     "search_file_timelines",
     "Search file timelines by path or process name substring.",
     { text: z.string().min(1), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(1000).default(50) },
-    async ({ text }) => {
-      const res = await session.run(`search ${JSON.stringify(text)}`);
+    async ({ text, offset, limit }) => {
+      const res = await holder.current.runCommand({
+        name: "search",
+        positional: [text],
+        flags: { offset: String(offset), limit: String(limit) },
+      });
       if (!res.ok) return toolError(res.error ?? "search failed");
       return { content: [{ type: "text", text: JSON.stringify({ ok: true, data: res.data }) }] };
     },
@@ -162,7 +170,7 @@ function registerTools(server: McpServer, session: HarilSession): void {
       identityKind: z.enum(["exact", "path-scoped"]).optional(),
     },
     async ({ directory, offset, limit, pathPattern, identityKind }) => {
-      const res = await session.runCommand({
+      const res = await holder.current.runCommand({
         name: "ls",
         positional: [directory],
         flags: {
@@ -195,7 +203,7 @@ function registerTools(server: McpServer, session: HarilSession): void {
       if (failedOnly) filter["failed"] = true;
       if (pid != null) filter["pid"] = String(pid);
       if (processName) filter["process"] = processName;
-      const res = await session.runCommand({
+      const res = await holder.current.runCommand({
         name: "events",
         positional: [fileKeyHash],
         flags: { ...filter, limit: String(limit), offset: String(offset) },
@@ -210,9 +218,9 @@ function registerTools(server: McpServer, session: HarilSession): void {
     "Inspect one event of a file timeline.",
     { fileKeyHash: z.string(), eventIndex: z.number().int().min(1) },
     async ({ fileKeyHash, eventIndex }) => {
-      const res = await session.runCommand({
+      const res = await holder.current.runCommand({
         name: "evidence",
-        positional: [String(eventIndex)],
+        positional: [fileKeyHash, String(eventIndex)],
         flags: {},
       });
       if (!res.ok) return toolError(res.error ?? "evidence failed");
@@ -225,7 +233,7 @@ function registerTools(server: McpServer, session: HarilSession): void {
     "Aggregated metrics for one file timeline.",
     { fileKeyHash: z.string() },
     async ({ fileKeyHash }) => {
-      const res = await session.runCommand({
+      const res = await holder.current.runCommand({
         name: "summary",
         positional: [fileKeyHash],
         flags: {},
@@ -240,7 +248,7 @@ function registerTools(server: McpServer, session: HarilSession): void {
     "Observed size transitions for files with non-null FILE_ID_128 in both inventories.",
     {},
     async () => {
-      const res = await session.run("size-changes");
+      const res = await holder.current.run("size-changes");
       if (!res.ok) return toolError(res.error ?? "size-changes failed");
       return { content: [{ type: "text", text: JSON.stringify({ ok: true, data: res.data }) }] };
     },

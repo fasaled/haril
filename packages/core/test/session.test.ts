@@ -175,6 +175,97 @@ describe("session", () => {
     expect(data.eventKindCounts["OpEnd"]).toBe(1);
   });
 
+  test("events inspects file timeline by path and supports op filter", async () => {
+    const res = await session.run("events \\src\\index.ts");
+    expect(res.ok).toBe(true);
+    const data = res.data as { items: { eventKind: string }[] };
+    expect(data.items.length).toBe(3);
+
+    const filtered = await session.run("events \\src\\index.ts --op Write");
+    expect(filtered.ok).toBe(true);
+    const filteredData = filtered.data as { items: { eventKind: string }[] };
+    expect(filteredData.items.length).toBe(1);
+    expect(filteredData.items[0]!.eventKind).toBe("Write");
+  });
+
+  test("evidence retrieves event by id", async () => {
+    const res = await session.run("evidence 1");
+    expect(res.ok).toBe(true);
+    const data = res.data as { id: number; eventKind: string };
+    expect(data.id).toBe(1);
+    expect(data.eventKind).toBe("Create");
+  });
+
+  test("evidence retrieves event with file and id", async () => {
+    const res = await session.run("evidence \\src\\index.ts 2");
+    expect(res.ok).toBe(true);
+    const data = res.data as { id: number; eventKind: string };
+    expect(data.id).toBe(2);
+    expect(data.eventKind).toBe("Write");
+  });
+
+  test("summary returns aggregated activity for a file", async () => {
+    const res = await session.run("summary \\src\\index.ts");
+    expect(res.ok).toBe(true);
+    const data = res.data as { eventCount: number; operationCounts: Record<string, number> };
+    expect(data.eventCount).toBe(3);
+    expect(data.operationCounts["Create"]).toBe(1);
+  });
+
+  test("dirs returns observed directories", async () => {
+    const res = await session.run("dirs");
+    expect(res.ok).toBe(true);
+    const data = res.data as { items: { directory: string }[] };
+    expect(data.items.length).toBeGreaterThan(0);
+  });
+
+  test("size-changes returns size changes message", async () => {
+    const res = await session.run("size-changes");
+    expect(res.ok).toBe(true);
+  });
+
+  test("heuristics toggles session heuristics", async () => {
+    const on = await session.run("heuristics on");
+    expect(on.ok).toBe(true);
+    expect(session.snapshot().heuristicsEnabled).toBe(true);
+
+    const off = await session.run("heuristics off");
+    expect(off.ok).toBe(true);
+    expect(session.snapshot().heuristicsEnabled).toBe(false);
+  });
+
+  test("pwd and cd change working directory", async () => {
+    const pwd1 = await session.run("pwd");
+    expect(pwd1.ok).toBe(true);
+
+    const cd = await session.run("cd src");
+    expect(cd.ok).toBe(true);
+    expect(session.snapshot().cwd).toContain("src");
+  });
+
+  test("pagination flags offset and limit are respected", async () => {
+    const paged = await session.runCommand({
+      name: "ls",
+      positional: [],
+      flags: { offset: "0", limit: "1" },
+    });
+    expect(paged.ok).toBe(true);
+    const data = paged.data as { items: unknown[]; hasMore: boolean };
+    expect(data.items.length).toBe(1);
+    expect(data.hasMore).toBe(true);
+  });
+
+  test("close transitions phase back to empty", async () => {
+    const freshSession = new HarilSession();
+    freshSession.setPackage({ path: packagePath, manifest: await readPackage(packagePath).then((p) => p.manifest) });
+    expect(freshSession.snapshot().phase).toBe("analyze");
+
+    const closed = await freshSession.run("close");
+    expect(closed.ok).toBe(true);
+    expect(freshSession.snapshot().phase).toBe("empty");
+    freshSession.close();
+  });
+
   test("empty phase rejects unknown commands", () => {
     const empty = new HarilSession();
     return expect(empty.run("ls")).resolves.toEqual(expect.objectContaining({ ok: false }));

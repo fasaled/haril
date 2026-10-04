@@ -76,7 +76,7 @@ function thisDir(): string {
 
 function candidatePaths(): string[] {
   const out: string[] = [];
-  const override = process.env["HARIL_NATIVE_NODE"];
+  const override = process.env["HARIL_NATIVE_NODE"] ?? process.env["HARIL_NATIVE_DLL"];
   if (override) out.push(override);
 
   const archDir = process.arch === "arm64" ? "bin-arm64" : "bin";

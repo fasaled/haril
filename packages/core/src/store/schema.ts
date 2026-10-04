@@ -44,7 +44,7 @@ CREATE INDEX IF NOT EXISTS events_pid_ts ON events(pid, timestamp_ns);
 CREATE INDEX IF NOT EXISTS events_source_ts ON events(source, timestamp_ns);
 
 CREATE TABLE IF NOT EXISTS inventory_entries (
-  path TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
   length INTEGER NOT NULL,
   last_write_time_ns INTEGER,
   creation_time_ns INTEGER,
@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS inventory_entries (
   file_id128_lo BLOB,
   volume_serial INTEGER,
   observed_at_ns INTEGER NOT NULL,
-  is_initial INTEGER NOT NULL
+  is_initial INTEGER NOT NULL,
+  PRIMARY KEY (path, is_initial)
 );
 
 CREATE TABLE IF NOT EXISTS usn_records (

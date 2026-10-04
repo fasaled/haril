@@ -1,12 +1,21 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Box, Text, useInput, useFocus } from "ink";
-import type { FileKey, InventoryEntry, EventKind, SourceId } from "@haril-ts/core";
+import { Box, Text, useInput } from "ink";
+import type { EventKind } from "@haril-ts/core";
 import { Box as InkBox } from "ink";
 
+export interface FileItem {
+  fileKeyHash: string;
+  display?: string;
+  path?: string | null;
+  kind?: "exact" | "path";
+  eventCount?: number;
+  attributes?: number;
+}
+
 export interface FileBrowserProps {
-  entries: InventoryEntry[];
-  selectedKey: FileKey | null;
-  onSelect: (key: FileKey) => void;
+  entries: FileItem[];
+  selectedKeyHash: string | null;
+  onSelect: (entry: FileItem) => void;
   onNavigate: (direction: "up" | "down" | "first" | "last" | "pageUp" | "pageDown") => void;
   isFocused: boolean;
   filter?: { text?: string; eventKinds?: EventKind[] };
@@ -15,7 +24,7 @@ export interface FileBrowserProps {
 
 export const FileBrowser: React.FC<FileBrowserProps> = ({
   entries,
-  selectedKey,
+  selectedKeyHash,
   onSelect,
   onNavigate,
   isFocused,
@@ -23,27 +32,21 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   loading,
 }) => {
   const [scrollOffset, setScrollOffset] = useState(0);
-  const visibleHeight = useMemo(() => 20, []); // approximate visible items
+  const visibleHeight = useMemo(() => 20, []);
 
   const filteredEntries = useMemo(() => {
     let result = entries;
     if (filter?.text) {
       const lower = filter.text.toLowerCase();
-      result = result.filter(e => e.path.toLowerCase().includes(lower));
+      result = result.filter(e => (e.path || e.display || "").toLowerCase().includes(lower));
     }
     return result;
   }, [entries, filter?.text]);
 
   const selectedIndex = useMemo(() => {
-    if (!selectedKey) return -1;
-    return filteredEntries.findIndex(e => {
-      if (selectedKey.kind === "exact") {
-        return e.fileId128 && e.volumeSerial === selectedKey.volumeSerial &&
-               e.fileId128.every((b, i) => b === selectedKey.fileId128[i]);
-      }
-      return e.path === selectedKey.path;
-    });
-  }, [filteredEntries, selectedKey]);
+    if (!selectedKeyHash) return -1;
+    return filteredEntries.findIndex(e => e.fileKeyHash === selectedKeyHash);
+  }, [filteredEntries, selectedKeyHash]);
 
   // Auto-scroll to keep selected item visible
   useEffect(() => {
@@ -57,8 +60,8 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   }, [selectedIndex, visibleHeight]);
 
   const handleInput = (input: string, key: any) => {
-    if (key.upArrow || key.k && (key.ctrl || key.meta)) onNavigate("up");
-    if (key.downArrow || key.j && (key.ctrl || key.meta)) onNavigate("down");
+    if (key.upArrow || (key.k && (key.ctrl || key.meta))) onNavigate("up");
+    if (key.downArrow || (key.j && (key.ctrl || key.meta))) onNavigate("down");
     if (key.home || (key.g && key.g)) onNavigate("first");
     if (key.end || (key.G && key.shift)) onNavigate("last");
     if (key.pageUp) onNavigate("pageUp");
@@ -66,14 +69,8 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
     if (key.return) {
       const entry = filteredEntries[selectedIndex];
       if (entry) {
-        const key: FileKey = entry.fileId128 && entry.volumeSerial
-          ? { kind: "exact", volumeSerial: entry.volumeSerial, fileId128: entry.fileId128 }
-          : { kind: "path", root: "", path: entry.path };
-        onSelect(key);
+        onSelect(entry);
       }
-    }
-    if (key.f && key.ctrl) {
-      // toggle filter
     }
   };
 
@@ -103,30 +100,33 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
           const absoluteIndex = scrollOffset + i;
           const isSelected = absoluteIndex === selectedIndex;
           const isFocusedItem = isSelected && isFocused;
-          
-          const attrs = entry.attributes;
+
+          const attrs = entry.attributes ?? 0;
           const isDir = (attrs & 0x10) !== 0;
           const isHidden = (attrs & 0x2) !== 0;
-          
+
           const icon = isDir ? "📁 " : "📄 ";
-          const name = entry.path.split("\\").pop() || entry.path;
-          
+          const name = entry.path ? (entry.path.split("\\").pop() || entry.path) : (entry.display || entry.fileKeyHash);
+          const eventSuffix = entry.eventCount !== undefined && entry.eventCount > 0 ? ` (${entry.eventCount})` : "";
+
           const color = isFocusedItem ? (isSelected ? "black" : "white") : "white";
           const backgroundColor = isFocusedItem ? (isSelected ? "cyan" : "blue") : undefined;
-          
+
           return (
-            <Box key={entry.path} marginLeft={1}>
+            <Box key={entry.fileKeyHash || String(i)} marginLeft={1}>
               <Text color={color} backgroundColor={backgroundColor}>
-                {icon}{name}
+                {icon}{name}{eventSuffix}
                 {isHidden && <Text dimColor> (hidden)</Text>}
               </Text>
             </Box>
           );
         })}
         {visibleEntries.length === 0 && (
-          <Text dimColor marginLeft={1}>
-            {filter?.text ? "No matches" : "No files"}
-          </Text>
+          <Box marginLeft={1}>
+            <Text dimColor>
+              {filter?.text ? "No matches" : "No files"}
+            </Text>
+          </Box>
         )}
       </Box>
       {keyBindings}

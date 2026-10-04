@@ -198,9 +198,11 @@ export const EventList: React.FC<EventListProps> = ({
           );
         })}
         {visibleEvents.length === 0 && (
-          <Text dimColor marginLeft={1}>
-            {filteredEvents.length === 0 ? "No events" : "No matches"}
-          </Text>
+          <Box marginLeft={1}>
+            <Text dimColor>
+              {filteredEvents.length === 0 ? "No events" : "No matches"}
+            </Text>
+          </Box>
         )}
       </Box>
       {keyBindings}
