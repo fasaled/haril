@@ -9,14 +9,18 @@
  *
  * Resolution order:
  *   1. `$HARIL_NATIVE_NODE` (explicit override, file path).
- *   2. `<repo>/native/out/bin[-<arch>]/haril_native.node` (dev).
- *   3. Next to the running executable/bundle (distributed layout).
+ *   2. Next to the running executable/bundle (distributed portable layout).
+ *   3. Auto-extracted embedded addon (standalone single-file layout).
+ *   4. `<repo>/native/out/bin[-<arch>]/haril_native.node` (dev layout).
+ *   5. Standard `%LOCALAPPDATA%/Haril/bin/<arch>/haril_native.node` directory.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { EMBEDDED_NATIVE_PAYLOADS } from "./embedded_addon.ts";
 
 export interface NativeInventoryRow {
   path: string;
@@ -74,21 +78,98 @@ function thisDir(): string {
   return dirname(fileURLToPath(meta.url));
 }
 
+/**
+ * Returns the directory where embedded native addons are extracted.
+ * Defaults to `%LOCALAPPDATA%/Haril/bin` on Windows, or `<tmpdir>/Haril/bin`.
+ */
+export function getExtractedNativeDir(): string {
+  const localAppData = process.env["LOCALAPPDATA"] ?? tmpdir();
+  return join(localAppData, "Haril", "bin");
+}
+
+const cachedExtractedPaths = new Map<string, string>();
+
+/**
+ * Ensures the embedded native addon for the specified architecture is
+ * extracted to disk in a persistent location (%LOCALAPPDATA%/Haril/bin/<arch>).
+ * Returns the path on disk if available, or null if no embedded payload exists.
+ */
+export function ensureExtractedNative(arch: string = process.arch): string | null {
+  const cached = cachedExtractedPaths.get(arch);
+  if (cached) return cached;
+
+  const payload = EMBEDDED_NATIVE_PAYLOADS[arch as "x64" | "arm64"];
+  if (!payload || !payload.base64) return null;
+
+  try {
+    const dir = join(getExtractedNativeDir(), arch);
+    const target = join(dir, "haril_native.node");
+    const buffer = Buffer.from(payload.base64, "base64");
+
+    if (existsSync(target)) {
+      try {
+        const existing = readFileSync(target);
+        if (existing.length === buffer.length && existing.equals(buffer)) {
+          cachedExtractedPaths.set(arch, target);
+          return target;
+        }
+      } catch {
+        // Fallback to re-writing
+      }
+    }
+
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(target, buffer);
+    cachedExtractedPaths.set(arch, target);
+    return target;
+  } catch {
+    // If LOCALAPPDATA write fails, fallback to temp directory
+    try {
+      const fallbackDir = join(tmpdir(), "haril-bin", arch);
+      const target = join(fallbackDir, "haril_native.node");
+      const buffer = Buffer.from(payload.base64, "base64");
+      mkdirSync(fallbackDir, { recursive: true });
+      writeFileSync(target, buffer);
+      cachedExtractedPaths.set(arch, target);
+      return target;
+    } catch {
+      return null;
+    }
+  }
+}
+
 function candidatePaths(): string[] {
   const out: string[] = [];
   const override = process.env["HARIL_NATIVE_NODE"] ?? process.env["HARIL_NATIVE_DLL"];
   if (override) out.push(override);
 
-  const archDir = process.arch === "arm64" ? "bin-arm64" : "bin";
-  // Dev layout: <repo>/packages/core/src/ffi/bindings.ts -> <repo>/native/...
-  out.push(join(thisDir(), "..", "..", "..", "..", "native", "out", archDir, "haril_native.node"));
-
-  // Distributed layout: next to the executable or bundle.
+  // 1. Distributed portable layout: next to the executable or bundle.
   try {
     out.push(join(dirname(process.execPath), "haril_native.node"));
   } catch {
     // ignore
   }
+
+  // 2. Standalone layout: auto-extracted embedded native addon.
+  try {
+    const extracted = ensureExtractedNative(process.arch);
+    if (extracted) out.push(extracted);
+  } catch {
+    // ignore
+  }
+
+  // 3. Dev layout: <repo>/packages/core/src/ffi/bindings.ts -> <repo>/native/...
+  const archDir = process.arch === "arm64" ? "bin-arm64" : "bin";
+  out.push(join(thisDir(), "..", "..", "..", "..", "native", "out", archDir, "haril_native.node"));
+
+  // 4. Previously extracted locations in %LOCALAPPDATA%/Haril/bin
+  try {
+    out.push(join(getExtractedNativeDir(), process.arch, "haril_native.node"));
+    out.push(join(getExtractedNativeDir(), "haril_native.node"));
+  } catch {
+    // ignore
+  }
+
   return out;
 }
 

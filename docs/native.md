@@ -59,6 +59,20 @@ The C++ source is C++20 with selected C++23 features (`std::jthread`, `std::span
 - **RAII for ETW/USN threads** via `std::jthread`: on `HarilContext` destruction we explicitly request stop and join. On any other path (errors, exception), the `std::jthread` joins in its own destructor.
 - **`std::atomic<bool>` flags** for stop signalling from the producer to the ETW consumer thread (more reliable than `stop_token` here because we don't pass `stop_token` through `std::jthread` constructors in this MSVC version).
 
+### Standalone Distribution (Single-File Binary)
+
+To distribute a single self-contained `haril.exe` without requiring a loose `haril_native.node` file alongside it:
+
+```powershell
+bun run build:standalone
+```
+
+This executes:
+1. `bun run scripts/embed-native.ts`: Reads the compiled native addon from `native/out/bin/` and embeds it as a payload inside `packages/core/src/ffi/embedded_addon.ts`.
+2. `bun build packages/cli/src/cli.ts --compile --outfile dist/haril.exe`: Generates a single executable containing the Bun runtime, UI, SQLite engine, and the embedded native addon.
+
+At runtime on Windows, `bindings.ts` automatically extracts the addon to `%LOCALAPPDATA%/Haril/bin/<arch>/haril_native.node` on first use.
+
 ## Layout
 
 ```

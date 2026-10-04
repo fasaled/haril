@@ -73,13 +73,21 @@ while ensuring Windows capture always requires the native addin.
   C++ workload (to build `haril_native.node`).
 - Windows 11 with an NTFS volume (for capture).
 
-## Run
+## Distribution & Run
+
+### Distribution on Windows
+
+The default Windows distribution is a **single-file standalone binary** (`dist/haril.exe`).
+It embeds the Bun JS runtime, SQLite engine, CLI/TUI, and the native C++ capture engine (`haril_native.node`) into a single executable.
+On first run, it automatically extracts the native addon to `%LOCALAPPDATA%\Haril\bin\<arch>\haril_native.node` so no separate DLL/.node files need to be shipped.
+
+```bash
+bun run build:standalone    # produces dist/haril.exe
+```
 
 ### Using the standalone executable
 
-The compiled executable in `dist/haril.exe` (built with
-`bun build --compile`) contains everything and needs no Bun
-installation:
+The compiled standalone executable contains everything and needs no Bun installation:
 
 ```powershell
 dist\haril.exe --version
@@ -94,10 +102,10 @@ dist\haril.exe completion bash | Out-String | Invoke-Expression
 
 ```bash
 bun install
-bun run build:native     # haril_native.node x64 (requires MSVC Build Tools)
-bun run dev              # launches the TUI
-bun run mcp              # launches the MCP stdio server
-bun run build:exe        # produces dist/haril.exe
+bun run build:native          # haril_native.node x64 (requires MSVC Build Tools)
+bun run dev                   # launches the TUI
+bun run mcp                   # launches the MCP stdio server
+bun run build:standalone      # produces standalone dist/haril.exe
 ```
 
 ## Tests

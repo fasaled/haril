@@ -38,7 +38,7 @@ export type { SessionSnapshot, StartCaptureArgs } from "./session.ts";
 
 export { limits } from "./limits.ts";
 
-export { native, requireNative } from "./ffi/bindings.ts";
+export { native, requireNative, ensureExtractedNative, getExtractedNativeDir } from "./ffi/bindings.ts";
 export type { NativeBindings, NativeInventoryRow, NativeFileId } from "./ffi/bindings.ts";
 export { ringConsumer, drainOnce, decodeSlots, decodeSlot, SLOT_SIZE } from "./ffi/ring_consumer.ts";
 export type { RingConsumer, DecodedSlot, UsnSlotIdentity } from "./ffi/ring_consumer.ts";

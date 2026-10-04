@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { native, requireNative } from "../src/ffi/bindings.ts";
+import { native, requireNative, ensureExtractedNative, getExtractedNativeDir } from "../src/ffi/bindings.ts";
 import { decodeSlot, decodeSlots, SLOT_SIZE } from "../src/ffi/ring_consumer.ts";
 
 function makeSlot(fields: {
@@ -137,5 +137,19 @@ describe("live native addon", () => {
     // Only meaningful when the addon is missing; if it loaded, skip.
     if (native()) return;
     expect(() => requireNative("test")).toThrow(/haril_native\.node not available/);
+  });
+});
+
+describe("embedded native extraction", () => {
+  test("getExtractedNativeDir returns valid path containing Haril", () => {
+    const dir = getExtractedNativeDir();
+    expect(typeof dir).toBe("string");
+    expect(dir.length).toBeGreaterThan(0);
+    expect(dir.includes("Haril")).toBe(true);
+  });
+
+  test("ensureExtractedNative returns null for nonexistent arch payload", () => {
+    const result = ensureExtractedNative("unknown-arch" as any);
+    expect(result).toBeNull();
   });
 });

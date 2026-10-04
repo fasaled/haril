@@ -178,5 +178,18 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 **Consequences:** MVP captures synchronously, writes a package, and immediately opens analysis. The interactive live-capture UI is deferred to a future release.
 
+## DEC-033 — Embedded native addon for single-file standalone distribution
+
+**Context:** Distributing `dist/haril.exe` previously required distributing `haril_native.node` alongside the executable. Win32 `LoadLibraryW` requires a physical file path on disk, preventing direct in-memory DLL execution. However, users expect a single-file `haril.exe` download without loose DLL dependencies.
+
+**Decision:** Implement an embed-and-extract standalone distribution mode (`bun run build:standalone`):
+- `scripts/embed-native.ts` embeds the compiled native `.node` binary as a base64 payload inside `packages/core/src/ffi/embedded_addon.ts`.
+- `bun build --compile` packages Bun, JS, dependencies, and the embedded payload into a single `dist/haril.exe`.
+- At runtime on Windows, `ensureExtractedNative()` extracts the payload to `%LOCALAPPDATA%/Haril/bin/<arch>/haril_native.node` (or `%TEMP%/haril-bin/` fallback) on first use, caching and reusing it if matching.
+- UAC elevation (`ShellExecuteExW("runas")`) seamlessly shares the extracted addon in `%LOCALAPPDATA%/Haril/bin/`.
+- Multi-file portable layout (`haril.exe` + `haril_native.node` next to each other) and developer layout continue to work with higher priority if present.
+
+**Consequences:** Users can download and execute a single standalone `haril.exe` without sacrificing kernel ETW and USN capture capabilities or requiring manual extraction.
+
 ---
 *All decisions above are self-contained for this project. No prior knowledge of other tools or the original Haril project is required.*
