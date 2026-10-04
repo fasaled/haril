@@ -90,12 +90,12 @@ bun run build:standalone    # produces dist/haril.exe
 The compiled standalone executable contains everything and needs no Bun installation:
 
 ```powershell
-dist\haril.exe --version
-dist\haril.exe help
-dist\haril.exe mcp packages\core\test\fixtures\smoke.haril
-dist\haril.exe                          # launches TUI (Empty phase)
-dist\haril.exe --resume-pending         # resumes a pending capture
-dist\haril.exe completion bash | Out-String | Invoke-Expression
+haril.exe --version
+haril.exe help
+haril.exe mcp packages\core\test\fixtures\smoke.haril
+haril.exe                          # launches TUI (Empty phase)
+haril.exe --resume-pending         # resumes a pending capture
+haril.exe completion bash | Out-String | Invoke-Expression
 ```
 
 ### From source
