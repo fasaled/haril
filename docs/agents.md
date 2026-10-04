@@ -20,12 +20,12 @@ This project has three logical layers:
 ## Build cycle
 
 ```bash
-bun install                # workspace install
+bun install --frozen-lockfile # reproducible workspace install
 bun test                   # unit + integration tests
 bun run typecheck          # tsc --noEmit
 bun run build:native       # native addon via MSBuild (x64 Release)
 bun run build:native:arm64 # native addon via MSBuild (arm64 Release)
-bun run build              # JS bundle + standalone haril.exe
+bun run build              # native addons + standalone haril.exe
 ```
 
 The native addon is **required on Windows** for capture functionality. Without it, the JS code degrades gracefully and you can still run the test suite and analyze packages.
@@ -47,7 +47,8 @@ The native addon is **required on Windows** for capture functionality. Without i
 - Inventory: `native/src/core.cpp`, `walk_dir_rows` (paths + `FILE_ID_INFO`).
 - Schema caching: `HarilContext::Impl::get_schema`.
 - N-API surface: `native/src/napi_addon.cpp`. New exports need an entry in the `EXPORT(...)` list, a matching member in `packages/core/src/ffi/bindings.ts`, and headers from `node-api-headers` (devDependency; never `node-addon-api`).
-- Link inputs: `native/node.lib` (x64) / `native/node-arm64.lib`, downloaded from `nodejs.org/dist` by `build-windows.ps1`. Both are gitignored.
+- N-API imports are resolved dynamically; do not vendor `node.lib` files.
+  Headers come from the locked `node-api-headers` development dependency.
 
 After changing the native side:
 
@@ -71,15 +72,19 @@ The most common failures:
 - Typecheck errors after a model change — usually `index.ts` needs new exports.
 - Stale `smoke.haril` fixture: regenerate with `bun run packages/core/test/fixtures/make-fixture.ts` before `bun test`.
 - MSBuild `C1083: Cannot open include file 'node_api.h'`: the `node-api-headers` devDependency is missing or `$(NodeApiHeadersDir)` is misconfigured in `haril_native.vcxproj`.
-- MSBuild `LNK2001: unresolved external symbol napi_*`: `native/node.lib` (or `node-arm64.lib`) is missing; the build script downloads it from `nodejs.org` — check network access.
+- MSBuild `LNK2001: unresolved external symbol napi_*`: verify that
+  `src/napi_dyn.cpp` still resolves every imported N-API symbol dynamically;
+  no `node.lib` should be required.
 - `LoadLibrary failed: %1 is not a valid Win32 application` when loading the addon: architecture mismatch (x64 `.node` in an arm64 process or vice versa). Build/select the `.node` matching `process.arch`.
 
 ## Conventions
 
 - Pure functions preferred over stateful modules.
 - No `any` in `packages/core/`; `any` is OK only at the FFI boundary in `bindings.ts` and `ring_consumer.ts`.
-- Do not introduce new dependencies without checking that the package works under Node (the published bin runs under Node, not Bun).
-- `bun:sqlite` is Bun-only; it works under Bun test runs but would not work in a Node-published bin. The published bin never invokes the live store; it always imports a `.haril` first.
+- Do not introduce new dependencies without checking that they work under Bun
+  1.3.x and in a compiled Bun executable.
+- `bun:sqlite` is intentionally Bun-only; both the package bin and standalone
+  executable run on Bun.
 - Native code is modern C++ (`stdcpplatest`): RAII handles (`UniqueHandle`), `std::jthread` with atomic stop flags, `std::span` for buffers, no raw owning pointers outside the C-export boundary. Keep `<windows.h>` out of public headers (`core.h` is pimpl-style).
 - Never install dependencies outside the repo (no `C:\tmp\nodeapi` style workarounds). Dev-only headers belong in `devDependencies` (`node-api-headers`), never vendored by hand into `native/include/`.
 

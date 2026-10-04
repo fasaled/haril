@@ -16,7 +16,7 @@
  * render with confidence.
  */
 
-import type { EventKind, NormalizedEvent } from "./types.ts";
+import type { NormalizedEvent } from "./types.ts";
 
 export type HeuristicBridgeKind = "InferredRecreation" | "InferredAtomicReplacement";
 

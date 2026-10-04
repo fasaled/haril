@@ -9,7 +9,7 @@
  * the change kind. That is acknowledged and reported.
  */
 
-import { watch, type WatchListener, type FSWatcher } from "node:fs";
+import { watch, type FSWatcher } from "node:fs";
 import type { PathNotification } from "../model/types.ts";
 
 export interface FsWatcherOptions {

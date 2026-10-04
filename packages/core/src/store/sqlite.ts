@@ -9,7 +9,7 @@
 
 import { Database } from "bun:sqlite";
 import { SCHEMA_SQL } from "./schema.ts";
-import type { FileKey, NormalizedEvent, InventoryEntry, UsnRecord, PathNotification, SourceEvent, EventKind, SourceId } from "../model/types.ts";
+import type { FileKey, NormalizedEvent, InventoryEntry, UsnRecord, PathNotification, EventKind, SourceId } from "../model/types.ts";
 import { fileKeyHash } from "../model/fileKey.ts";
 
 export interface StoreConfig {

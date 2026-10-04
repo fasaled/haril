@@ -21,7 +21,7 @@
  * The two domains are never mixed inside one package.
  */
 
-import { mkdirSync, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { writePackage } from "../package/writer.ts";
 import type {

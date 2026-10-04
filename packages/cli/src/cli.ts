@@ -6,6 +6,7 @@
  *   haril --resume-pending                 → TUI reading pending-session.json
  *   haril mcp [path.haril]                 → MCP stdio server
  *   haril mcp --events <journal.jsonl>     → MCP server with journal
+ *   haril doctor                           → Runtime and native-addon diagnostics
  *   haril completion <shell>               → shell completion script
  *   haril help
  *   haril --version
@@ -17,10 +18,11 @@ import { App } from "./tui/App.tsx";
 import { KEYBOARD_HELP } from "./tui/keys.ts";
 import { serveMcp } from "./mcp/serve.ts";
 import { runCompletion } from "./completion.ts";
-import { HarilSession, createSession } from "../../core/src/index.ts";
+import { createSession } from "../../core/src/index.ts";
 import { resumePendingSession } from "./resume.ts";
+import { getExtractedNativeDir, native } from "../../core/src/ffi/bindings.ts";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -49,6 +51,10 @@ async function main(): Promise<void> {
 
     case "completion":
       runCompletion(args[1] ?? "");
+      return;
+
+    case "doctor":
+      runDoctor();
       return;
 
     case "--resume-pending":
@@ -103,6 +109,16 @@ async function runMcp(args: string[]): Promise<void> {
   await serveMcp({ packagePath, journalPath });
 }
 
+function runDoctor(): void {
+  const addon = native();
+  console.log(`Haril ${VERSION}`);
+  console.log(`Runtime: Bun ${Bun.version}`);
+  console.log(`Platform: ${process.platform} ${process.arch}`);
+  console.log(`Native capture: ${addon ? `available (${addon.version})` : "unavailable"}`);
+  console.log(`Native directory: ${getExtractedNativeDir()}`);
+  process.exitCode = addon || process.platform !== "win32" ? 0 : 1;
+}
+
 function printHelp(): void {
   console.log(`haril ${VERSION}
 
@@ -113,6 +129,7 @@ USAGE
                                         MCP server over stdio
   haril completion <bash|zsh|fish|powershell>
                                         Print shell completion script
+  haril doctor                           Check runtime and native addon
   haril help
   haril --version
 

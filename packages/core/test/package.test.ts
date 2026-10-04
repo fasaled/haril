@@ -1,13 +1,15 @@
 import { describe, test, expect } from "bun:test";
 import { writePackage } from "../src/package/writer.ts";
 import { readPackage } from "../src/package/reader.ts";
-import { unlink } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Manifest } from "../src/model/types.ts";
 
 describe("package roundtrip", () => {
   test("writes and reads back a small package with hashes", async () => {
-    const outPath = `${import.meta.dir}/fixtures/smoke.haril`;
-    await unlink(outPath).catch(() => {});
+    const dir = await mkdtemp(join(tmpdir(), "haril-package-test-"));
+    const outPath = join(dir, "smoke.haril");
 
     const manifest: Omit<Manifest, "hashes"> = {
       schemaVersion: 1,
@@ -31,28 +33,33 @@ describe("package roundtrip", () => {
       },
     };
 
-    const written = writePackage(outPath, {
-      manifest,
-      inventory: [],
-      finalInventory: [],
-      events: [],
-      sourceEvents: [],
-      notifications: [],
-      usn: [],
-    });
+    try {
+      const written = writePackage(outPath, {
+        manifest,
+        inventory: [],
+        finalInventory: [],
+        events: [],
+        sourceEvents: [],
+        notifications: [],
+        usn: [],
+      });
 
-    expect(written.hashes["events.jsonl"]).toBeTruthy();
-    expect(written.hashes["inventory.jsonl"]).toBeTruthy();
-    expect(written.hashes["usn-events.jsonl"]).toBeTruthy();
+      expect(written.hashes["events.jsonl"]).toBeTruthy();
+      expect(written.hashes["inventory.jsonl"]).toBeTruthy();
+      expect(written.hashes["usn-events.jsonl"]).toBeTruthy();
 
-    const contents = await readPackage(outPath);
-    expect(contents.manifest.schemaVersion).toBe(1);
-    expect(contents.manifest.fsKind).toBe("ntfs");
-    expect(contents.manifest.sessionId).toBe("test-session");
+      const contents = await readPackage(outPath);
+      expect(contents.manifest.schemaVersion).toBe(1);
+      expect(contents.manifest.fsKind).toBe("ntfs");
+      expect(contents.manifest.sessionId).toBe("test-session");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("rejects non-NTFS package", async () => {
-    const outPath = `${import.meta.dir}/fixtures/non-ntfs.haril`;
+    const dir = await mkdtemp(join(tmpdir(), "haril-package-test-"));
+    const outPath = join(dir, "non-ntfs.haril");
     const manifest: Omit<Manifest, "hashes"> = {
       schemaVersion: 1,
       sessionId: "x",
@@ -68,15 +75,19 @@ describe("package roundtrip", () => {
       },
       recordCounts: { events: 0, inventories: 0, usn: 0, notifications: 0, sourceEvents: 0 },
     };
-    writePackage(outPath, {
-      manifest,
-      inventory: [],
-      finalInventory: [],
-      events: [],
-      sourceEvents: [],
-      notifications: [],
-      usn: [],
-    });
-    await expect(readPackage(outPath)).rejects.toThrow(/non-NTFS/);
+    try {
+      writePackage(outPath, {
+        manifest,
+        inventory: [],
+        finalInventory: [],
+        events: [],
+        sourceEvents: [],
+        notifications: [],
+        usn: [],
+      });
+      await expect(readPackage(outPath)).rejects.toThrow(/non-NTFS/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

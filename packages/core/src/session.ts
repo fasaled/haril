@@ -11,7 +11,7 @@
  * happen by opening a package or by starting capture.
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve, win32 } from "node:path";
 
@@ -132,6 +132,7 @@ export class HarilSession {
   private _live: {
     version: number;
     root: string;
+    canonicalRoot: string;
     output: string;
     seconds: number;
     startedAt: number;
@@ -215,9 +216,16 @@ export class HarilSession {
   }
 
   private beginLive(root: string, output: string, seconds: number): void {
+    let canonicalRoot = root;
+    try {
+      canonicalRoot = realpathSync.native(root);
+    } catch {
+      // The root was validated immediately before this call; retain its original spelling.
+    }
     this._live = {
       version: 1,
       root,
+      canonicalRoot,
       output,
       seconds,
       startedAt: Date.now(),
@@ -233,7 +241,7 @@ export class HarilSession {
 
   private liveRelPath(p: string | null | undefined): string | null {
     if (!p || !this._live) return null;
-    const root = this._live.root.replace(/[\\/]+$/, "");
+    const root = this._live.canonicalRoot.replace(/[\\/]+$/, "");
     const norm = p.replace(/\//g, "\\");
     if (norm.toLowerCase().startsWith(root.toLowerCase() + "\\")) return norm.slice(root.length);
     return norm.startsWith("\\") ? norm : "\\" + norm;

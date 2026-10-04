@@ -4,7 +4,7 @@
  */
 
 import { describe, test, expect, beforeAll } from "bun:test";
-import { mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";

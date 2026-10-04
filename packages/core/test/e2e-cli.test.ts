@@ -8,12 +8,12 @@
  */
 
 import { describe, test, expect, beforeAll } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { writePackage, readPackage, HarilSession, SqliteStore, importPackageIntoStore } from "@haril-ts/core";
-import type { InventoryEntry, NormalizedEvent, Manifest } from "@haril-ts/core";
+import type { InventoryEntry, NormalizedEvent, } from "@haril-ts/core";
 
 let packagePath: string;
 let session: HarilSession;

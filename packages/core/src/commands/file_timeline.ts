@@ -11,13 +11,12 @@
  */
 
 import type { SqliteStore } from "../store/sqlite.ts";
-import type { BrowseFileTimelineRow, EventRow, FileActivitySummary, SessionOverview } from "../store/sqlite.ts";
-import type { CommandResult, EventFilter, EventKind, Manifest, NormalizedEvent, FileKey } from "../model/types.ts";
+import type { BrowseFileTimelineRow, EventRow, } from "../store/sqlite.ts";
+import type { CommandResult, EventFilter, NormalizedEvent, FileKey } from "../model/types.ts";
 import { fileKeyDisplay } from "../model/fileKey.ts";
 import {
   computeHeuristicBridges,
   mergedLaneEvents,
-  type AnnotatedTimelineLane,
   type FileTimelineLane,
 } from "../model/heuristic.ts";
 

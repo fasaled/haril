@@ -4,8 +4,7 @@
 
 import { readPackage, readPackageManifest } from "../package/reader.ts";
 import { SqliteStore } from "./sqlite.ts";
-import { fileKeyHash } from "../model/fileKey.ts";
-import type { InventoryEntry, Manifest, NormalizedEvent, UsnRecord, PathNotification } from "../model/types.ts";
+import type { Manifest, } from "../model/types.ts";
 
 export async function importPackageIntoStore(
   path: string,

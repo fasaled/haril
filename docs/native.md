@@ -29,7 +29,7 @@ The current build output contains the x64 build. To build for arm64, run `bun ru
 
 ## Toolchain
 
-We use **MSBuild** with **Visual Studio 2022 C++ Build Tools** (`MSBuild.exe` + `cl.exe` + `link.exe`) targeting **MSVC v143** and the **Windows 10/11 SDK** (10.0.26100.0 in this build).
+We use **MSBuild** with **Visual Studio 2022 C++ Build Tools** (`MSBuild.exe` + `cl.exe` + `link.exe`) targeting **MSVC v143** and the latest installed **Windows 10/11 SDK**.
 
 `build-windows.ps1` wraps the call:
 
@@ -45,7 +45,9 @@ The C++ source is C++20 with selected C++23 features (`std::jthread`, `std::span
 
 ### Addon loading
 
-The native core is shipped as a Node-API addon (`haril_native.node`, `NAPI_MODULE_INIT`) and loaded with plain `require()`. `packages/core/src/ffi/bindings.ts` resolves the file platform-aware (`bin` for x64, `bin-arm64` for arm64) and returns `null` when it cannot load, preserving analyze-only degradation. `node.lib` (per arch, from `nodejs.org/dist`) is linked at build time; it is downloaded by `build-windows.ps1` and gitignored.
+The native core is shipped as a Node-API addon (`haril_native.node`, `NAPI_MODULE_INIT`) and loaded with plain `require()`. `packages/core/src/ffi/bindings.ts` resolves the file platform-aware (`bin` for x64, `bin-arm64` for arm64) and returns `null` when it cannot load, preserving analyze-only degradation. N-API entry points are resolved dynamically, so no vendored `node.lib` import
+library is required. Headers come from the locked `node-api-headers`
+development dependency.
 
 ## C++ style guide (modern, RAII-first)
 
@@ -60,12 +62,19 @@ The native core is shipped as a Node-API addon (`haril_native.node`, `NAPI_MODUL
 To distribute a single self-contained `haril.exe` without requiring a loose `haril_native.node` file alongside it:
 
 ```powershell
-bun run build:standalone
+bun run build
 ```
 
 This executes:
-1. `bun run scripts/embed-native.ts`: Reads the compiled native addon from `native/out/bin/` and embeds it as a payload inside `packages/core/src/ffi/embedded_addon.ts`.
-2. `bun build packages/cli/src/cli.ts --compile --outfile dist/haril.exe`: Generates a single executable containing the Bun runtime, UI, SQLite engine, and the embedded native addon.
+1. Builds x64 and arm64 native addons with MSBuild.
+2. Temporarily injects both addons into the empty payload module.
+3. Runs `bun build --compile` to generate a single executable containing the
+   Bun runtime, UI, SQLite engine, and native addons.
+4. Restores the empty source module in a `finally` block.
+
+The final bundling step can also be invoked with `bun run build:standalone`
+after `bun run build:native:all`. Missing architectures are treated as an
+error so an incomplete Windows distribution is not produced accidentally.
 
 At runtime on Windows, `bindings.ts` automatically extracts the addon to `%LOCALAPPDATA%/Haril/bin/<arch>/haril_native.node` on first use.
 

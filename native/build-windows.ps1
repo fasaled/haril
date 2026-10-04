@@ -8,7 +8,7 @@
 # Requires:
 #   - Visual Studio 2022 Build Tools (or any VS with the C++ workload).
 #   - Windows 10/11 SDK installed.
-#   - node.lib from the matching Node.js distribution in native/. (not needed: N-API entry points are resolved dynamically)
+#   - node-api-headers installed by `bun install`.
 #
 # This script is also directly invocable from PowerShell:
 #   powershell -ExecutionPolicy Bypass -File .\native\build-windows.ps1 -Platform x64
@@ -25,17 +25,17 @@ param(
     [switch]$AllPlatforms
 )
 
-$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "Stop"
 
 # Find MSBuild via vswhere.exe (ships with VS Build Tools).
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path $vswhere)) {
-    Write-Error "vswhere.exe not found. Install Visual Studio 2022 Build Tools with the C++ workload."
+    throw "vswhere.exe not found. Install Visual Studio 2022 Build Tools with the C++ workload."
 }
 
 $vsPath = & $vswhere -latest -products * -requires Microsoft.Component.MSbuild -property installationPath
 if (-not $vsPath) {
-    Write-Error "No Visual Studio installation found that includes MSBuild."
+    throw "No Visual Studio installation found that includes MSBuild."
 }
 
 $msbuild = Join-Path $vsPath "MSBuild\Current\Bin\MSBuild.exe"
@@ -43,7 +43,7 @@ if (-not (Test-Path $msbuild)) {
     $msbuild = Join-Path $vsPath "MSBuild\15.0\Bin\MSBuild.exe"
 }
 if (-not (Test-Path $msbuild)) {
-    Write-Error "MSBuild.exe not found at $msbuild"
+    throw "MSBuild.exe not found at $msbuild"
 }
 
 Push-Location $PSScriptRoot
@@ -68,7 +68,7 @@ try {
             Write-Host "Building haril_native for $plat / $Configuration" -ForegroundColor Cyan
             & $msbuild /m /v:minimal /p:Configuration=$Configuration /p:Platform=$plat /p:PlatformToolset=$toolset /p:SolutionDir=$solutionDir haril_native.vcxproj
             if ($LASTEXITCODE -ne 0) {
-                Write-Error "MSBuild failed for ${plat}: exit ${LASTEXITCODE}"
+                throw "MSBuild failed for ${plat}: exit ${LASTEXITCODE}"
             }
         }
     }
@@ -111,7 +111,7 @@ foreach ($subDir in $outSubDirs) {
         }
     }
     else {
-        Write-Error "DLL not found at $dllPath"
+        throw "DLL not found at $dllPath"
     }
 }
 

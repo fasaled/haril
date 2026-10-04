@@ -11,7 +11,6 @@ import { describe, test, expect } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { ensureExtractedNative, getExtractedNativeDir } from "@haril-ts/core";
 
 const root = join(import.meta.dir, "..", "..", "..");
 const exePath = join(root, "dist", "haril.exe");
@@ -37,15 +36,11 @@ describe("standalone single-file binary e2e", () => {
     expect(res.stdout).toContain("start-capture");
   });
 
-  test("auto-extracts embedded native addon to disk", () => {
-    const extracted = ensureExtractedNative(process.arch);
-    expect(extracted).not.toBeNull();
-    expect(existsSync(extracted!)).toBe(true);
-    expect(extracted!).toContain("Haril");
-    expect(extracted!).toContain("haril_native.node");
-
-    const stats = statSync(extracted!);
-    expect(stats.size).toBeGreaterThan(100_000); // ~180KB - 200KB
+  test("loads the embedded native addon through doctor", () => {
+    const res = spawnSync(exePath, ["doctor"], { encoding: "utf8" });
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("Native capture: available");
+    expect(res.stdout).toContain(`Platform: ${process.platform} ${process.arch}`);
   });
 
   test("runs MCP server with real fixture package over stdio", async () => {

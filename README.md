@@ -68,10 +68,17 @@ while ensuring Windows capture always requires the native addin.
 
 ## Requirements
 
-- Bun 1.3+ (already inside the compiled executable).
-- For development: Bun 1.3+, Visual Studio 2022 Build Tools with the
+- Bun 1.3.x (the reference development version is pinned in `.bun-version`
+  and `packageManager`; it is already inside the compiled executable).
+- For development: Bun 1.3.x, Visual Studio 2022 Build Tools with the
   C++ workload (to build `haril_native.node`).
 - Windows 11 with an NTFS volume (for capture).
+
+Install dependencies from the committed lockfile:
+
+```bash
+bun install --frozen-lockfile
+```
 
 ## Distribution & Run
 
@@ -82,7 +89,7 @@ It embeds the Bun JS runtime, SQLite engine, CLI/TUI, and the native C++ capture
 On first run, it automatically extracts the native addon to `%LOCALAPPDATA%\Haril\bin\<arch>\haril_native.node` so no separate DLL/.node files need to be shipped.
 
 ```bash
-bun run build:standalone    # produces dist/haril.exe
+bun run build              # builds both native architectures and dist/haril.exe
 ```
 
 ### Using the standalone executable
@@ -96,24 +103,49 @@ haril.exe mcp packages\core\test\fixtures\smoke.haril
 haril.exe                          # launches TUI (Empty phase)
 haril.exe --resume-pending         # resumes a pending capture
 haril.exe completion bash | Out-String | Invoke-Expression
+haril.exe doctor                   # verifies runtime and native addon
 ```
 
 ### From source
 
 ```bash
-bun install
-bun run build:native          # haril_native.node x64 (requires MSVC Build Tools)
+bun install --frozen-lockfile
+bun run build:native          # development addon for x64 (requires MSVC Build Tools)
 bun run dev                   # launches the TUI
 bun run mcp                   # launches the MCP stdio server
-bun run build:standalone      # produces standalone dist/haril.exe
+bun run build                # builds native addons and standalone distribution
 ```
+
+`bun run build` is the portable top-level build. On Windows it builds both
+native architectures before producing the standalone executable. On macOS and
+Linux it skips the Windows-only addon and produces an analysis-only executable.
+Distribution builds inject native payloads only while bundling and restore the
+checked-in empty payload module even when the build fails.
+
+`bun run build:standalone` only performs the final bundling step. On Windows it
+expects both `native/out/bin/haril_native.node` and
+`native/out/bin-arm64/haril_native.node` to have been produced already by
+`bun run build:native:all`.
 
 ## Tests
 
 ```bash
-bun test                 # 24 unit + integration + MCP smoke tests
+bun test                 # unit, integration, native, CLI, and MCP tests
 bun run typecheck        # tsc --noEmit
 ```
+
+## Privacy and responsible use
+
+Haril capture packages can contain sensitive forensic metadata, including file
+and directory paths, process names, timestamps, file identifiers, filesystem
+events, and inventory data. They do not intentionally include file contents,
+but names and activity patterns alone may disclose confidential information.
+
+Only capture systems and directories you are authorized to inspect. Review a
+`.haril` package before sharing it, treat it as sensitive evidence, and transfer
+or store it using protections appropriate for the captured environment.
+
+For vulnerability reports, see [`SECURITY.md`](SECURITY.md).
 
 ## Project structure
 
@@ -140,4 +172,4 @@ docs/                     design.md, decisions.md, agents.md, native.md
 
 ## License
 
-MIT.
+MIT. Copyright (c) 2026 Francisco Sánchez.

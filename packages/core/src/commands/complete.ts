@@ -5,7 +5,7 @@
 
 import { readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import type { EventKind, FileKey, Phase } from "../model/types.ts";
+import type { FileKey, Phase } from "../model/types.ts";
 
 export type CompletionKind = "command" | "flag" | "path" | "fileKey" | "eventKey" | "processName";
 

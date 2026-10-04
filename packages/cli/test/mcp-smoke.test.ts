@@ -7,7 +7,7 @@
  * gracefully to analyze-only; the MCP server cannot start without the addon.
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, } from "bun:test";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { native } from "../../core/src/ffi/bindings.ts";

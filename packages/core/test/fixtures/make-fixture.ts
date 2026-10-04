@@ -6,7 +6,7 @@
  * Usage: bun run packages/core/test/fixtures/make-fixture.ts
  */
 
-import { writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+import { mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { writePackage } from "../../src/package/writer.ts";
 import type { InventoryEntry, NormalizedEvent, Manifest } from "../../src/model/types.ts";

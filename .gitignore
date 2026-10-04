@@ -1,6 +1,5 @@
 # Dependencies
 node_modules/
-bun.lock
 
 # Build outputs
 dist/
@@ -9,6 +8,7 @@ out/
 native/out/
 *.bun-build
 *.tgz
+packages/core/src/ffi/embedded_addon.generated.ts
 
 # MSVC / C++ intermediate and output files
 obj/

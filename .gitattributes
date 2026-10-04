@@ -1,0 +1,8 @@
+* text=auto
+
+*.haril binary
+*.ico binary
+*.lib binary
+*.node binary
+*.dll binary
+*.exe binary
