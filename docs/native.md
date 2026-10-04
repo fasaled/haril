@@ -149,7 +149,130 @@ A record is a head slot followed by `extraSlots` continuation slots (raw UTF-16L
 | 256 | 768 | observedPath, first 384 units (UTF-16LE) |
 
 The addon exports `slotSize`; the TS loader rejects an addon whose `slotSize` differs from `NATIVE_SLOT_SIZE`, so a stale extracted addon is never decoded with the wrong layout.
-## ETW session naming
+
+## Reading events from the disruptor ring buffer
+
+The native addon exposes a `drain(ctx, maxSlots)` API that reads whole records from the lock-free ring buffer. This is the sole consumer-facing entry point for captured events.
+
+### Event flow pipeline
+
+```text
+ETW Kernel Callback
+  │
+  ▼
+EtwEventCallback()          ← Windows kernel delivers events via PEVENT_RECORD
+  │
+  ├─► Decode MOF properties (TDH schema, property offsets)
+  │     └─▏ Opcode → event kind (Create/Read/Write/Close/…)
+  │     └─▏ FileObject/Key lookup (tracked in etwObjPaths / etwKeyPaths)
+  │     └─▏ Path translation (device prefix → drive letter, scope check)
+  │
+  ├─► encode_event_slot()    ← fills 1024-byte slot buffer
+  │
+  └─► ring.push_record()     ← CAS-atomically claim slot, publish flags
+       │
+       ▼
+USN Journal Thread
+  │
+  ▼
+usn_thread_entry()           ← DeviceIoControl FSCTL_READ_USN_JOURNAL
+  │
+  ├─► Read USN records from NTFS journal
+  │   └─▏ Resolve FRN → path (via parent FRN cache or OpenFileById)
+  │   └─▏ Apply scope filter (usnTargetRoot)
+  │
+  ├─► encode_event_slot()    ← fills slot with source=USN, kind=Notify
+  │   └─► encode_usn_extension() ← writes FRN, parentFRN, usn, reason at [176..204]
+  │
+  └─► ring.push_record()     ← same lock-free MPSC path
+```
+
+### How `drain()` works
+
+- Calls `ring.pop_batch(out_span, &seq)` to extract up to `maxSlots` **whole records**
+- The consumer iterates slots checking `available_[index].load(acquire) == seq + 1`
+- Verifies all continuation slots of a multi-slot record are published before copying
+- For ETW records, enriches each slot with the process image name via `process_name(pid)`
+- Returns `ArrayBuffer` of `n × HARIL_SLOT_SIZE` bytes (1,024 bytes per slot)
+- **Backpressure**: if the ring is full, the producer drops the whole record and increments `etwRingPushFailed`
+
+### Slot layout (1,024 bytes, little-endian)
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 ‑ 1 | 2 | **source** — 1=ETW, 2=USN, 3=FSW |
+| 2 ‑ 3 | 2 | **kind** — event kind (Create=1, Open=2, Read=3, Write=4, SetInfo=5, Close=6, Rename=7, Delete=8, OpEnd=9, Notify=10) |
+| 4 ‑ 11 | 8 | **timestamp_ns** — nanosecond timestamp (QPC → ns conversion) |
+| 12 ‑ 15 | 4 | **pid** — process identifier |
+| 16 ‑ 19 | 4 | **tid** — thread identifier |
+| 20 ‑ 27 | 8 | **irpPtr** — IRL pointer (overlapped I/O), or 0 |
+| 28 ‑ 31 | 4 | **ntStatus** — NT status code (0 when none) |
+| 32 ‑ 47 | 16 | **fileId128** — FILE_ID_128 bytes (16) |
+| 48 ‑ 51 | 4 | **volumeSerial** — volume serial number |
+| 52 ‑ 55 | 4 | **byteOffset** — low 32 bits of byte offset |
+| 56 ‑ 59 | 4 | **byteLength** — request byte length |
+| 60 ‑ 63 | 4 | **shareAccess** — share mode |
+| 64 ‑ 67 | 4 | **createOptions** — creation options (first 24 bits) |
+| 68 ‑ 71 | 4 | **createDisposition** — create disposition (high 8 bits of options) |
+| 72 ‑ 75 | 4 | **sourceEventIndex** — monotonic event counter |
+| 76 ‑ 77 | 2 | **pathLen** — total UTF-16 units of observed path (up to 32767) |
+| 78 ‑ 79 | 2 | **procLen** — process image name length in UTF-16 units |
+| 80 ‑ 81 | 2 | **extraSlots** — number of continuation slots following |
+| 112 ‑ 175 | 64 | **processImage** — process image name (UTF-16LE, 32 units = max 64 chars) |
+| 176 ‑ 203 | 28 | **USN extension** — present only for USN records: FRN (u64), parentFRN (u64), usn (u64), reason (u32) |
+| 256 ‑ 1023 | 768 | **observedPath** — first 384 UTF-16 units stored inline; remaining units in continuation slots |
+
+If `pathLen > 384` (i.e., `PATH_INLINE_CHARS`), the remaining path units continue in `extraSlots` continuation slots of raw UTF-16LE. Each continuation slot provides `HARIL_SLOT_SIZE / 2 = 512` UTF-16 units. The `decodeSlots` function reads continuation slots when needed.
+
+### TypeScript consumption
+
+`decodeSlots()` in `ring_consumer.ts` decodes the drain `Uint8Array` into `DecodedSlot[]`:
+
+```typescript
+export function decodeSlots(bytes: Uint8Array): DecodedSlot[] {
+  const out: DecodedSlot[] = [];
+  const n = Math.floor(bytes.length / SLOT_SIZE);
+  for (let i = 0; i < n; ) {
+    const head = bytes.subarray(i * SLOT_SIZE, (i + 1) * SLOT_SIZE);
+    const extra = Math.min(slotExtra(head), n - i - 1);
+    const cont = extra > 0 ? bytes.subarray((i + 1) * SLOT_SIZE, (i + 1 + extra) * SLOT_SIZE) : undefined;
+    out.push(decodeSlot(head, cont));
+    i += 1 + extra;
+  }
+  return out;
+}
+```
+
+Each `DecodedSlot` has the shape:
+
+```typescript
+{
+  event: NormalizedEvent & { source: SourceId; sourceEventIndex: number },
+  usn: UsnSlotIdentity | null,   // only present for USN-sourced slots
+}
+```
+
+where `NormalizedEvent` includes: `timestamp_ns`, `eventKind`, `fileKey`, `pid`, `tid`, `processImageName`, `irpPtr`, `ntStatus`, `observedPath`, `byteOffset`, `byteLength`, `shareAccess`, `createOptions`, `createDisposition`.
+
+### Observability counters
+
+The disruptor maintains atomic counters useful for diagnosing capture quality. All are exposed via N-API exports:
+
+| Counter | Meaning |
+|---------|---------|
+| `etwEventsObserved` | ETW events delivered to the callback |
+| `etwEventsLost` | Events lost by the kernel logger (buffer overflow, etc.) |
+| `etwOutOfScope` | Events whose path fell outside the configured scope root |
+| `etwWithoutPath` | Events where no path could be resolved from the MOF data |
+| `etwRingPushFailed` | Records dropped because the ring buffer was full (backpressure) |
+| `etwPushAttempted` | Total records attempted to push (observed + failed) |
+| `etwKindZero` | Events with opcode 0 (unused/neutral) |
+| `etwAfterKind` | Debug counter: reached after kind check |
+| `etwAfterScope` | Debug counter: reached after scope check |
+| `usnRecordsRead` | Total USN journal records read |
+| `usnDroppedUnresolved` | USN records that could not be resolved to a path (deleted, FRN missing) |
+
+These counters allow diagnosing capture quality: high `etwEventsLost` / `etwRingPushFailed` indicate buffer sizing issues; high `etwOutOfScope` / `etwWithoutPath` indicate scope configuration problems; high `usnDroppedUnresolved` indicates many files deleted or with unreachable FRNs during capture.
 
 The NT Kernel Logger only accepts its canonical session name (`NT Kernel Logger`); a custom name makes `StartTraceW` fail with `ERROR_INVALID_PARAMETER` (87). `etw_start` therefore always starts (or attaches to) the canonical session regardless of the name passed in. If another tool already owns the session (`ERROR_ALREADY_EXISTS`), we attach as a consumer and never stop a session we did not start (`etwOwnsSession` flag).
 
