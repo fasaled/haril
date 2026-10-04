@@ -4,6 +4,7 @@
   "description": "File-lifecycle reconstruction for Windows, in Bun + TypeScript",
   "type": "module",
   "private": true,
+  "license": "MIT",
   "workspaces": ["packages/*"],
   "scripts": {
     "dev": "bun run packages/cli/src/cli.ts",
