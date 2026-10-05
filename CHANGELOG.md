@@ -16,6 +16,12 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Clarified privacy, security, contribution, and release documentation.
 - Added Node.js 22.5+ compatibility to the npm CLI while retaining Bun 1.3.x
   and standalone executable support.
+- Built explicitly named `haril-x64.exe` and `haril-arm64.exe` standalone
+  artifacts while retaining both native addons in the cross-architecture npm
+  package.
+- Decoded the USN record reason into a lifecycle event kind (`Create`, `Write`,
+  `Rename`, `Delete`, `SetInfo`, `Close`) instead of emitting every journal
+  record as a generic `Notify`.
 
 ## [0.1.2] - 2026-10-04
 

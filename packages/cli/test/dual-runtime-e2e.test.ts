@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..", "..", "..");
@@ -93,6 +94,18 @@ async function exerciseMcp(runtime: Runtime): Promise<void> {
 }
 
 describe("published CLI dual-runtime compatibility", () => {
+  test("published bundle embeds native addons for x64 and arm64", () => {
+    const bundle = readFileSync(cliPath, "utf8");
+    const nativePayloadPrefixes = [
+      join(root, "native", "out", "bin", "haril_native.node"),
+      join(root, "native", "out", "bin-arm64", "haril_native.node"),
+    ].map((path) => readFileSync(path).toString("base64").slice(0, 128));
+
+    for (const prefix of nativePayloadPrefixes) {
+      expect(bundle).toContain(prefix);
+    }
+  });
+
   for (const runtime of runtimes) {
     test(`${runtime.name} reports version and runtime`, () => {
       const version = spawnSync(runtime.command, [cliPath, "--version"], {

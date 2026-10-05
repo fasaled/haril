@@ -22,6 +22,9 @@ File-lifecycle reconstruction for NTFS Windows, in **TypeScript + Node-API**.
 - **Node.js and Bun**. The npm package supports Node.js 22.5+ through
   `node:sqlite` and Bun 1.3.x through `bun:sqlite`. The standalone executable
   contains the Bun runtime and needs neither runtime installed.
+- **Native runtime architecture for capture**. On Windows ARM64, the npm
+  package must run under ARM64 Node.js or Bun. An x64 runtime under emulation
+  can analyze packages but is not supported for ETW capture.
 - **Windows only for capture** (`os: ["win32"]`). The native addon
   (`haril_native.node`) provides ETW + USN journal + FSW callbacks
   exclusively on Windows. Capture refuses non-NTFS volumes.
@@ -45,12 +48,13 @@ Capture uses `haril_native.node`, a Node-API addon built from C++
 with MSBuild + MSVC. See [`docs/native.md`](docs/native.md) for the
 linker targets and build steps.
 
-The native capture engine uses a **Disruptor-style Lock-Free Ring Buffer (MPSC)**
-backed by `VirtualAlloc` (256k slots × 256 bytes = 64 MiB). Multiple producers
-(high-frequency Kernel ETW callback + background NTFS USN journal thread)
-claim sequence tickets atomically via `fetch_add` and publish via atomic slot
-markers. This eliminates lock contention and thread synchronization bottlenecks,
-preventing ETW buffer drops (`EventsLost`) even during heavy disk I/O.
+The native capture engine uses a **lock-free MPSC ring buffer inspired by the
+Disruptor pattern**, backed by `VirtualAlloc` (65,536 slots × 1,024 bytes =
+64 MiB). Multiple producers (high-frequency Kernel ETW callback + background
+NTFS USN journal thread) claim sequence tickets atomically and publish through
+atomic slot markers. This eliminates lock contention and thread synchronization
+bottlenecks, preventing ETW buffer drops (`EventsLost`) even during heavy disk
+I/O.
 
 The addon is **required on Windows** for capture functionality
 (ETW + USN journal + FSW callbacks). Without it, the TUI
@@ -85,12 +89,14 @@ bun install --frozen-lockfile
 
 ### Distribution on Windows
 
-The default Windows distribution is a **single-file standalone binary** (`dist/haril.exe`).
-It embeds the Bun JS runtime, SQLite engine, CLI/TUI, and the native C++ capture engine (`haril_native.node`) into a single executable.
+The default Windows distribution consists of two architecture-specific
+single-file binaries: `dist/haril-x64.exe` and `dist/haril-arm64.exe`. Each
+embeds the matching Bun runtime, the CLI/TUI, SQLite engine, and both native
+capture addons; at runtime Haril extracts only the addon matching the process.
 On first run, it automatically extracts the native addon to `%LOCALAPPDATA%\Haril\bin\<arch>\haril_native.node` so no separate DLL/.node files need to be shipped.
 
 ```bash
-bun run build              # builds both native architectures and dist/haril.exe
+bun run build              # builds dist/haril-x64.exe and dist/haril-arm64.exe
 ```
 
 ### Using the standalone executable
@@ -99,13 +105,13 @@ The compiled standalone executable contains everything and needs no Node.js or
 Bun installation:
 
 ```powershell
-haril.exe --version
-haril.exe help
-haril.exe mcp packages\core\test\fixtures\smoke.haril
-haril.exe                          # launches TUI (Empty phase)
-haril.exe --resume-pending         # resumes a pending capture
-haril.exe completion bash | Out-String | Invoke-Expression
-haril.exe doctor                   # verifies runtime and native addon
+haril-arm64.exe --version          # use on Windows ARM64
+haril-x64.exe help                 # use on Windows x64
+haril-x64.exe mcp packages\core\test\fixtures\smoke.haril
+haril-x64.exe                      # launches TUI (Empty phase)
+haril-x64.exe --resume-pending     # resumes a pending capture
+haril-x64.exe completion bash | Out-String | Invoke-Expression
+haril-x64.exe doctor               # verifies runtime and native addon
 ```
 
 ### From source

@@ -11,7 +11,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, renameSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -114,6 +114,45 @@ if (IS_NATIVE_AVAILABLE) {
 
       // Events should still be captured via FSW synthesis
       expect(result.events.length).toBeGreaterThan(0);
+    }, 30000);
+
+    test("USN events carry the lifecycle kind decoded from the record reason", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "haril-usn-kinds-"));
+      const root = join(tmp, "watched");
+      mkdirSync(root);
+      mkdirSync(join(root, "sub"));
+
+      // Exercise the whole lifecycle inside the window so the journal
+      // records create, data-change, rename and delete reasons.
+      const churn = (async () => {
+        await new Promise((r) => setTimeout(r, 500));
+        for (let i = 0; i < 6; i++) {
+          const f = join(root, `u${i}.txt`);
+          writeFileSync(f, "a".repeat(128));
+          writeFileSync(f, "b".repeat(256));
+          const moved = join(root, "sub", `moved-${i}.txt`);
+          renameSync(f, moved);
+          if (i % 2 === 0) unlinkSync(moved);
+        }
+      })();
+
+      const out = join(tmp, "out-usn-kinds.haril");
+      const result = await runCapture({ root, output: out, seconds: 4 });
+      await churn;
+
+      const lib = native();
+      if (!lib || lib.isAdmin() !== 1) return; // the journal needs elevation
+
+      const usn = result.events.filter((e) => e.source === "usn");
+      expect(usn.length).toBeGreaterThan(0);
+
+      // Before the reason mapping every USN event collapsed to "Notify",
+      // which made them redundant duplicates of the ETW timeline.
+      expect(usn.every((e) => e.eventKind === "Notify")).toBe(false);
+
+      const kinds = new Set(usn.map((e) => e.eventKind));
+      expect(kinds.has("Create")).toBe(true);
+      expect(kinds.size).toBeGreaterThan(1);
     }, 30000);
   });
 } else {

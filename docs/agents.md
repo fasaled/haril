@@ -27,7 +27,7 @@ bun test                   # unit + integration tests
 bun run typecheck          # tsc --noEmit
 bun run build:native       # native addon via MSBuild (x64 Release)
 bun run build:native:arm64 # native addon via MSBuild (arm64 Release)
-bun run build              # native addons + standalone haril.exe
+bun run build              # native addons + haril-x64.exe and haril-arm64.exe
 ```
 
 The native addon is **required on Windows** for capture functionality. Without it, the JS code degrades gracefully and you can still run the test suite and analyze packages.

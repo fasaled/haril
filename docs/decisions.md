@@ -94,9 +94,14 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 ## DEC-022 — Single-file executable per RID via `bun build --compile`
 
-**Decision:** `bun build --compile --target=bun-windows-x64 --outfile=dist/haril.exe`. The native DLL sits next to the executable.
+**Decision:** Build one explicitly named executable per Windows architecture:
+`bun build --compile --target=bun-windows-x64 --outfile=dist/haril-x64.exe`
+and `bun build --compile --target=bun-windows-arm64
+--outfile=dist/haril-arm64.exe`.
 
-**Consequences:** A standalone `haril.exe` that can be distributed and run without requiring Bun to be installed (it embeds the runtime). The native addon `.node` file must be present alongside the `.exe` for capture to work.
+**Consequences:** Each standalone executable runs natively on its target
+architecture without requiring Bun. The architecture suffix prevents users
+from accidentally running the x64 build under Windows ARM64 emulation.
 
 ## DEC-023 — Bun-only runtime (not Node-compatible) at development time
 
@@ -118,11 +123,12 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 **Consequences:** Memory safety. No handle leaks. Reliable thread shutdown.
 
-## DEC-025B — Lock-Free Disruptor Ring Buffer (MPSC) for Kernel Event Streaming
+## DEC-025B — Lock-Free MPSC Ring Buffer for Kernel Event Streaming
 
 **Context:** The capture pipeline receives events from two independent native threads: the kernel ETW callback (`EtwEventCallback`, which runs at dispatch/kernel context and must never be blocked) and the NTFS USN journal polling thread (`usn_thread_entry`). Synchronizing these threads with a conventional mutex caused priority inversion and contention, leading to ETW buffer overruns (`EventsLost`) under heavy file I/O workloads.
 
-**Decision:** Replace the mutex-protected queue with an in-memory Lock-Free Ring Buffer based on the LMAX Disruptor pattern:
+**Decision:** Replace the mutex-protected queue with an in-memory lock-free
+MPSC ring buffer inspired by the Disruptor pattern:
 - Pre-allocated 64 MiB buffer (65,536 slots of 1,024 bytes) via Win32 `VirtualAlloc`.
 - Atomic sequence claiming using `fetch_add` on `head_seq_`.
 - Slot publication barriers using an atomic sequence array (`available_`) with release semantics.
@@ -160,6 +166,14 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 **Consequences:** USN records carry enough identity information to track files across renames and moves, and their FRN-based `fileId128` matches the inventory identity.
 
+## DEC-049 — USN records carry the lifecycle kind decoded from their reason
+
+**Context:** The USN producer emitted every journal record with a fixed `Notify` kind while storing the `reason` bitmask in the slot extension. A measured 6-second capture produced 114 USN events, all `Notify`, covering no path that ETW had not already reported: roughly 29% of the timeline was semantically empty duplication, even though the producer had already decoded the reason that explains each record.
+
+**Decision:** `usn_reason_to_kind()` maps the accumulated reason bitmask onto a single `EventKind` at encode time, most decisive outcome first (`Delete` > `Create` > `Rename` > `Write` > `SetInfo` > `Close` > `Notify`). The producer stays the single source of truth for `kind`; the full bitmask remains in the slot extension and in `usn_records` for consumers that need the detail.
+
+**Consequences:** Journal events describe what happened instead of merely that something happened, so they act as a semantic safety net when ETW drops events (`eventsLost`). The same measured workload now yields `Create`, `Write`, `Rename` and `Delete` kinds and no `Notify`. Because a record accumulates reasons until close, one file change can surface as several records sharing the same kind — the journal's own granularity, not a duplication introduced here.
+
 ## DEC-031 — Single QPC clock domain per package
 
 **Context:** Native event slots carry QPC nanoseconds; JS `hrtime` is a different monotonic clock. Mixing them breaks timeline ordering.
@@ -178,16 +192,23 @@ On non-Windows hosts (macOS, Linux), the native addon is not built and the proje
 
 ## DEC-033 — Embedded native addon for single-file standalone distribution
 
-**Context:** Distributing `dist/haril.exe` previously required distributing `haril_native.node` alongside the executable. Win32 `LoadLibraryW` requires a physical file path on disk, preventing direct in-memory DLL execution. However, users expect a single-file `haril.exe` download without loose DLL dependencies.
+**Context:** Distributing the standalone executable previously required distributing `haril_native.node` alongside it. Win32 `LoadLibraryW` requires a physical file path on disk, preventing direct in-memory DLL execution. However, users expect a single-file download without loose DLL dependencies.
 
 **Decision:** Implement an embed-and-extract standalone distribution mode (`bun run build:standalone`):
 - `scripts/embed-native.ts` embeds the compiled native `.node` binary as a base64 payload inside `packages/core/src/ffi/embedded_addon.ts`.
-- `bun build --compile` packages Bun, JS, dependencies, and the embedded payload into a single `dist/haril.exe`.
+- `bun build --compile` packages Bun, JS, dependencies, and the embedded
+  payload into architecture-specific `dist/haril-x64.exe` and
+  `dist/haril-arm64.exe` files.
 - At runtime on Windows, `ensureExtractedNative()` extracts the payload to `%LOCALAPPDATA%/Haril/bin/<arch>/haril_native.node` (or `%TEMP%/haril-bin/` fallback) on first use, caching and reusing it if matching.
 - UAC elevation (`ShellExecuteExW("runas")`) seamlessly shares the extracted addon in `%LOCALAPPDATA%/Haril/bin/`.
-- Multi-file portable layout (`haril.exe` + `haril_native.node` next to each other) and developer layout continue to work with higher priority if present.
+- Multi-file portable layout (executable + `haril_native.node` next to each
+  other) and developer layout continue to work with higher priority if present.
 
-**Consequences:** Users can download and execute a single standalone `haril.exe` without sacrificing kernel ETW and USN capture capabilities or requiring manual extraction.
+**Consequences:** Users select the executable matching their Windows
+architecture and can run it without sacrificing kernel ETW and USN capture
+capabilities or requiring manual extraction. The npm package remains one
+cross-architecture JavaScript artifact because its Node.js or Bun host process
+selects the matching embedded addon through `process.arch`.
 
 ---
 *All decisions above are self-contained for this project. No prior knowledge of other tools or the original Haril project is required.*

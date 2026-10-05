@@ -25,6 +25,12 @@ The output mirrors by architecture:
 
 On ARM64 Windows hosts, you must build/select the arm64 `.node` file. An x64 `.node` cannot load into an arm64 process (`LoadLibrary` fails with `%1 is not a valid Win32 application`). Conversely, on x64 Windows the x64 `.node` is required.
 
+The npm package embeds both addons and selects one using `process.arch`.
+Therefore, Windows ARM64 capture must run under an ARM64 Node.js or Bun
+runtime. An emulated x64 runtime selects the x64 addon as expected, but ETW
+capture from that emulated process is unsupported; use the ARM64 runtime or
+the `haril-arm64.exe` standalone build instead.
+
 The current build output contains the x64 build. To build for arm64, run `bun run build:native:arm64` on an arm64 host or via cross-compilation setup.
 
 ## Toolchain
@@ -59,7 +65,8 @@ development dependency.
 
 ### Standalone Distribution (Single-File Binary)
 
-To distribute a single self-contained `haril.exe` without requiring a loose `haril_native.node` file alongside it:
+To distribute self-contained executables without requiring a loose
+`haril_native.node` file alongside them:
 
 ```powershell
 bun run build
@@ -68,13 +75,17 @@ bun run build
 This executes:
 1. Builds x64 and arm64 native addons with MSBuild.
 2. Temporarily injects both addons into the empty payload module.
-3. Runs `bun build --compile` to generate a single executable containing the
-   Bun runtime, UI, SQLite engine, and native addons.
+3. Runs `bun build --compile` with explicit `bun-windows-x64` and
+   `bun-windows-arm64` targets to generate `dist/haril-x64.exe` and
+   `dist/haril-arm64.exe`. Each contains the matching Bun runtime, UI, SQLite
+   engine, and both native addons.
 4. Restores the empty source module in a `finally` block.
 
 The final bundling step can also be invoked with `bun run build:standalone`
 after `bun run build:native:all`. Missing architectures are treated as an
 error so an incomplete Windows distribution is not produced accidentally.
+The architecture suffix is mandatory because a Windows PE executable cannot
+be native for x64 and ARM64 simultaneously.
 
 At runtime on Windows, `bindings.ts` automatically extracts the addon to `%LOCALAPPDATA%/Haril/bin/<arch>/haril_native.node` on first use.
 
@@ -117,9 +128,10 @@ The addon exports 18 N-API functions wrapped in `napi_addon.cpp`. The public hea
 
 Strings are UTF-16LE with explicit length because N-API does not auto-convert UTF-8 to UTF-16LE; the `napi_addon.cpp` wrapper converts JS strings on the way in.
 
-## Disruptor Ring Buffer Engine (Lock-Free MPSC)
+## Lock-Free MPSC Ring Buffer
 
-The ring buffer implements the LMAX Disruptor pattern for Multi-Producer Single-Consumer (MPSC) concurrency without locks:
+The Multi-Producer Single-Consumer (MPSC) ring buffer is lock-free and inspired
+by the Disruptor pattern:
 - Pre-allocated 64 MiB ring storage (65,536 slots × 1,024 bytes) via Win32 `VirtualAlloc`.
 - Whole-record claiming via CAS on `head_seq_` (head + continuation slots; nothing is claimed when the record does not fit).
 - Publication flags (`available_`) per slot updated with `std::memory_order_release`.
@@ -159,7 +171,7 @@ A record is a head slot followed by `extraSlots` continuation slots (raw UTF-16L
 
 The addon exports `slotSize`; the TS loader rejects an addon whose `slotSize` differs from `NATIVE_SLOT_SIZE`, so a stale extracted addon is never decoded with the wrong layout.
 
-## Reading events from the disruptor ring buffer
+## Reading events from the lock-free ring buffer
 
 The native addon exposes a `drain(ctx, maxSlots)` API that reads whole records from the lock-free ring buffer. This is the sole consumer-facing entry point for captured events.
 
@@ -190,7 +202,7 @@ usn_thread_entry()           ← DeviceIoControl FSCTL_READ_USN_JOURNAL
   │   └─▏ Resolve FRN → path (via parent FRN cache or OpenFileById)
   │   └─▏ Apply scope filter (usnTargetRoot)
   │
-  ├─► encode_event_slot()    ← fills slot with source=USN, kind=Notify
+  ├─► encode_event_slot()    ← fills slot with source=USN, kind from the record reason
   │   └─► encode_usn_extension() ← writes FRN, parentFRN, usn, reason at [176..204]
   │
   └─► ring.push_record()     ← same lock-free MPSC path
@@ -265,7 +277,8 @@ where `NormalizedEvent` includes: `timestamp_ns`, `eventKind`, `fileKey`, `pid`,
 
 ### Observability counters
 
-The disruptor maintains atomic counters useful for diagnosing capture quality. All are exposed via N-API exports:
+The ring buffer maintains atomic counters useful for diagnosing capture
+quality. All are exposed via N-API exports:
 
 | Counter | Meaning |
 |---------|---------|
@@ -288,6 +301,25 @@ The NT Kernel Logger only accepts its canonical session name (`NT Kernel Logger`
 ## USN journal identity in slot [176..204]
 
 USN records need FRN identity that ETW slots do not carry. The USN producer writes `fileReferenceNumber`, `parentFileReferenceNumber`, `usn` (u64 each) and `reason` (u32) at slot offsets `[176..204]`, and the FRN zero-extended as `fileId128` with the root's volume serial (matching inventory keys). The TS decoder exposes them as `DecodedSlot.usn`.
+
+This identity is not a convenience: ETW slots are encoded with a null `fileId`, so for files created *and* deleted inside the capture window — absent from both the initial and the final inventory — the journal is the only source that can give their events an exact file key. Without it those events fall back to a path-scoped key and cannot be told apart from a later file reusing the same name.
+
+## USN reason → event kind
+
+A USN record accumulates every reason bit seen since the file was opened, so one record can mean "created, written and deleted". `usn_reason_to_kind()` collapses that bitmask onto the single kind that describes the record best, most decisive outcome first:
+
+| Priority | Reason bits | Kind |
+| --- | --- | --- |
+| 1 | `FILE_DELETE` | `Delete` |
+| 2 | `FILE_CREATE` | `Create` |
+| 3 | `RENAME_OLD_NAME`, `RENAME_NEW_NAME` | `Rename` |
+| 4 | `DATA_*`, `NAMED_DATA_*` | `Write` |
+| 5 | `BASIC_INFO_CHANGE`, `SECURITY_CHANGE`, `EA_CHANGE`, `STREAM_CHANGE`, and the other metadata reasons | `SetInfo` |
+| 6 | `CLOSE` | `Close` |
+| 7 | anything else | `Notify` |
+
+A file that ends up deleted is a `Delete` regardless of what happened before it, which is why `FILE_DELETE` outranks `FILE_CREATE`. The full bitmask stays in the slot extension and in the `usn_records` table, so consumers that need the detail never lose it.
+
 ## UAC scenario (confirmed end-to-end)
 
 After build, the following is verified:

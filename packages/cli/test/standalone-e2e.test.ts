@@ -1,5 +1,5 @@
 /**
- * End-to-end test for the compiled standalone single-file binary (`dist/haril.exe`).
+ * End-to-end test for the architecture-specific standalone binaries.
  *
  * Verifies that:
  * 1. The standalone binary starts cleanly and reports version/help.
@@ -9,17 +9,38 @@
 
 import { describe, test, expect } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, openSync, closeSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..", "..", "..");
-const exePath = join(root, "dist", "haril.exe");
+const executablePaths = {
+  x64: join(root, "dist", "haril-x64.exe"),
+  arm64: join(root, "dist", "haril-arm64.exe"),
+};
+const exePath = executablePaths[process.arch as keyof typeof executablePaths];
+
+function readPeMachine(path: string): number {
+  const fd = openSync(path, "r");
+  try {
+    const offsetBuffer = Buffer.alloc(4);
+    readSync(fd, offsetBuffer, 0, offsetBuffer.length, 0x3c);
+    const machineBuffer = Buffer.alloc(2);
+    readSync(fd, machineBuffer, 0, machineBuffer.length, offsetBuffer.readUInt32LE(0) + 4);
+    return machineBuffer.readUInt16LE(0);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 describe("standalone single-file binary e2e", () => {
-  test("compiled binary dist/haril.exe exists and is non-empty", () => {
-    expect(existsSync(exePath)).toBe(true);
-    const stats = statSync(exePath);
-    expect(stats.size).toBeGreaterThan(1_000_000); // Bun standalone binary is typically 50MB+
+  test("compiled x64 and arm64 binaries exist with unambiguous architectures", () => {
+    expect(existsSync(join(root, "dist", "haril.exe"))).toBe(false);
+    for (const path of Object.values(executablePaths)) {
+      expect(existsSync(path)).toBe(true);
+      expect(statSync(path).size).toBeGreaterThan(1_000_000);
+    }
+    expect(readPeMachine(executablePaths.x64)).toBe(0x8664);
+    expect(readPeMachine(executablePaths.arm64)).toBe(0xaa64);
   });
 
   test("executes --version successfully", () => {

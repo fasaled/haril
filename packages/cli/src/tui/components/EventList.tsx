@@ -188,7 +188,7 @@ export const EventList: React.FC<EventListProps> = ({
           const backgroundColor = isFocusedItem ? (isSelected ? "cyan" : "blue") : undefined;
           
           const processName = event.processImageName || "?";
-          const pid = event.pid !== undefined ? event.pid.toString() : "?";
+          const pid = event.pid > 0 ? event.pid.toString() : "?";
           
           return (
             <Box key={absoluteIndex} marginLeft={1}>

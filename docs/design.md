@@ -124,9 +124,11 @@ Only Create and the Name family carry a path. The callback keeps `FileObject -> 
 
 Paths are translated from `\Device\HarddiskVolumeN` to the DOS drive and scoped to the root. The root is canonicalized (`GetFinalPathNameByHandleW`, also `realpathSync.native` in TS) so every source agrees on one spelling; paths spelled through the 8.3 alias (`C:\Users\FRANCI~1\...`), fully or in mixed form, are rewritten to the canonical root. Kernel buffers are 64–256 × 1 MiB so FileIo bursts do not cause `EventsLost`.
 
-## Disruptor Lock-Free Ring Buffer (MPSC)
+## Lock-Free MPSC Ring Buffer
 
-Capture transfers events from the kernel to the Bun/TypeScript side through an **in-memory lock-free ring buffer inspired by the LMAX Disruptor** (Multi-Producer Single-Consumer):
+Capture transfers events from the kernel to the Bun/TypeScript side through an
+**in-memory lock-free Multi-Producer Single-Consumer (MPSC) ring buffer inspired
+by the Disruptor pattern**:
 - **Pre-allocated backing memory**: 64 MiB (65,536 slots of 1,024 bytes) via `VirtualAlloc(PAGE_READWRITE)`.
 - **Variable-length records**: a record is a head slot plus up to 64 continuation slots, so paths up to the Windows limit (32,767 UTF-16 units) are carried without truncation. Producers claim the whole record with a CAS on `head_seq_`; if it does not fit, nothing is claimed (no unpublished holes that would stall the consumer).
 - **Publication barriers**: each slot has an atomic sequence flag; continuation slots are published before the head.

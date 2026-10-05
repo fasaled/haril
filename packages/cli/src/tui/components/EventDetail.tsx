@@ -63,7 +63,7 @@ function buildSections(event: NormalizedEvent, baseNs: unknown): Array<{ title: 
       `Kind:        ${event.eventKind}`,
       `Source:      ${String(event.source ?? "?").toUpperCase()}`,
       `Timestamp:   ${formatEventTime(ts, baseNs)}${ts !== null ? ` (${ts} ns)` : ""}`,
-      `PID/TID:     ${event.pid ?? "?"} / ${event.tid ?? "?"}`,
+      `PID/TID:     ${event.pid > 0 ? event.pid : "?"} / ${event.tid > 0 ? event.tid : "?"}`,
       `Process:     ${event.processImageName || "?"}`,
       `IRP:         ${event.irpPtr ? hex(event.irpPtr) : "?"}`,
       `NT Status:   ${hex(event.ntStatus)}`,

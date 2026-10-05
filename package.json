@@ -15,7 +15,7 @@
     "build:native": "powershell -ExecutionPolicy Bypass -File ./native/build-windows.ps1 -Platform x64",
     "build:native:arm64": "powershell -ExecutionPolicy Bypass -File ./native/build-windows.ps1 -Platform arm64",
     "build:native:all": "powershell -ExecutionPolicy Bypass -File ./native/build-windows.ps1 -AllPlatforms",
-    "build:exe": "bun --compile dist/haril.js --outfile dist/haril.exe",
+    "build:exe": "bun run build:standalone",
     "build:native:host": "bun run scripts/build-native-host.ts",
     "build:package": "bun run build:native:host && bun run scripts/build-distribution.ts package",
     "pack:package": "bun run build:package && npm pack ./packages/cli",

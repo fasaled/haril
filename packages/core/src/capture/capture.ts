@@ -459,7 +459,7 @@ export async function runCapture(rawOpts: CaptureOptions): Promise<CaptureResult
   return { packagePath: opts.output, manifest: written, events, notifications, nativeAvailable: lib !== null };
 }
 
-function buildEventsFromDiff(
+export function buildEventsFromDiff(
   initial: InventoryEntry[],
   final: InventoryEntry[],
 ): NormalizedEvent[] {
@@ -488,7 +488,7 @@ function buildEventsFromDiff(
             : null,
         pid: 0,
         tid: 0,
-        processImageName: "haril-capture",
+        processImageName: null,
         irpPtr: null,
         ntStatus: null,
         observedPath: fin.path,
@@ -511,7 +511,7 @@ function buildEventsFromDiff(
             : null,
         pid: 0,
         tid: 0,
-        processImageName: "haril-capture",
+        processImageName: null,
         irpPtr: null,
         ntStatus: null,
         observedPath: fin.path,
@@ -538,7 +538,7 @@ function buildEventsFromDiff(
             : null,
         pid: 0,
         tid: 0,
-        processImageName: "haril-capture",
+        processImageName: null,
         irpPtr: null,
         ntStatus: null,
         observedPath: ini.path,

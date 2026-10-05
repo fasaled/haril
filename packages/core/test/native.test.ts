@@ -20,7 +20,7 @@ import {
   PATH_INLINE_CHARS,
   PROC_OFFSET,
 } from "../src/ffi/ring_consumer.ts";
-import { attachFileKeys, DirectoryClassifier } from "../src/capture/capture.ts";
+import { attachFileKeys, buildEventsFromDiff, DirectoryClassifier } from "../src/capture/capture.ts";
 import type { InventoryEntry, NormalizedEvent } from "../src/model/types.ts";
 
 /** Encodes a record (head + continuation slots) like native push_record. */
@@ -195,6 +195,36 @@ describe("capture file keys", () => {
     expect(d.isDirectory("\\SUB\\deep")).toBe(true);
     expect(d.isDirectory("\\sub\\deep\\f.txt")).toBe(false);
     expect(d.isDirectory("\\gone.txt")).toBe(false);
+  });
+});
+
+describe("inventory diff events", () => {
+  const entry = (path: string, length: number, observedAt = 10n): InventoryEntry => ({
+    path,
+    length,
+    attributes: 0x20,
+    lastWriteTime: observedAt,
+    creationTime: observedAt,
+    fileId128: null,
+    volumeSerial: null,
+    observedAt,
+  });
+
+  test("does not attribute synthesized timeline events to the capture process", () => {
+    const initial = [
+      entry("\\modified.txt", 1),
+      entry("\\deleted.txt", 1),
+    ];
+    const final = [
+      entry("\\modified.txt", 2),
+      entry("\\created.txt", 1),
+    ];
+
+    const events = buildEventsFromDiff(initial, final);
+
+    expect(events.map((event) => event.eventKind).sort()).toEqual(["Create", "Delete", "Write"]);
+    expect(events.every((event) => event.pid === 0)).toBe(true);
+    expect(events.every((event) => event.processImageName === null)).toBe(true);
   });
 });
 

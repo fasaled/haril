@@ -41,6 +41,10 @@ The package includes the CLI bundle and native capture addons for Windows x64
 and ARM64. A standalone executable built from the repository includes its
 runtime and does not require a separate Node.js or Bun installation.
 
+On Windows ARM64, capture requires an ARM64 build of Node.js or Bun. Running
+the npm package with an x64 runtime under emulation is supported only for
+analysis because ETW capture from the emulated x64 process is not reliable.
+
 ## Platform support
 
 | Platform | Open and analyze `.haril` packages | Capture new activity |

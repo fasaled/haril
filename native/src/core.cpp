@@ -278,6 +278,35 @@ constexpr std::uint16_t kKindDelete = 8;
 constexpr std::uint16_t kKindOpEnd  = 9;
 constexpr std::uint16_t kKindNotify = 10;
 
+// A USN record accumulates every reason bit seen since the file was
+// opened, so a single record can mean "created, written and deleted".
+// Collapse that bitmask onto the one lifecycle kind that describes the
+// record best, most decisive outcome first: a file that ends up deleted
+// is a Delete regardless of what happened before it. The full bitmask
+// stays in the slot's USN extension for consumers that need the detail.
+constexpr std::uint32_t kUsnDataReasons =
+    USN_REASON_DATA_OVERWRITE | USN_REASON_DATA_EXTEND | USN_REASON_DATA_TRUNCATION |
+    USN_REASON_NAMED_DATA_OVERWRITE | USN_REASON_NAMED_DATA_EXTEND |
+    USN_REASON_NAMED_DATA_TRUNCATION;
+
+constexpr std::uint32_t kUsnMetadataReasons =
+    USN_REASON_BASIC_INFO_CHANGE | USN_REASON_SECURITY_CHANGE | USN_REASON_EA_CHANGE |
+    USN_REASON_HARD_LINK_CHANGE | USN_REASON_COMPRESSION_CHANGE |
+    USN_REASON_ENCRYPTION_CHANGE | USN_REASON_OBJECT_ID_CHANGE |
+    USN_REASON_REPARSE_POINT_CHANGE | USN_REASON_STREAM_CHANGE |
+    USN_REASON_INDEXABLE_CHANGE | USN_REASON_INTEGRITY_CHANGE |
+    USN_REASON_DESIRED_STORAGE_CLASS_CHANGE | USN_REASON_TRANSACTED_CHANGE;
+
+constexpr std::uint16_t usn_reason_to_kind(std::uint32_t reason) noexcept {
+    if (reason & USN_REASON_FILE_DELETE) return kKindDelete;
+    if (reason & USN_REASON_FILE_CREATE) return kKindCreate;
+    if (reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME)) return kKindRename;
+    if (reason & kUsnDataReasons) return kKindWrite;
+    if (reason & kUsnMetadataReasons) return kKindSetInfo;
+    if (reason & USN_REASON_CLOSE) return kKindClose;
+    return kKindNotify;
+}
+
 // ----------------------- ETW constants -----------------------
 
 // Kernel FileIo MOF class (NT Kernel Logger): {90CBDC39-4A3E-11D1-84F4-0000F80464E3}.
@@ -1156,7 +1185,8 @@ struct HarilContext::Impl {
                 // same identity the inventory reads via FILE_ID_INFO.
                 std::uint8_t fileId[16] = {0};
                 std::memcpy(fileId, &frn, sizeof(frn));
-                encode_event_slot(slot, HARIL_SOURCE_USN, kKindNotify, ts,
+                encode_event_slot(slot, HARIL_SOURCE_USN,
+                                  usn_reason_to_kind(static_cast<std::uint32_t>(r->Reason)), ts,
                                   0, 0, 0, 0, fileId, usnVolumeSerial,
                                   0, 0, 0, 0, 0,
                                   static_cast<std::uint32_t>(usnRecordsRead.load()),
