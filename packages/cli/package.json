@@ -1,6 +1,6 @@
 {
   "name": "@fasaled/haril",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "File-lifecycle reconstruction and analysis CLI",
   "type": "module",
   "license": "MIT",

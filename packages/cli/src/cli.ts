@@ -22,7 +22,7 @@ import { createSession } from "../../core/src/index.ts";
 import { resumePendingSession } from "./resume.ts";
 import { getExtractedNativeDir, native } from "../../core/src/ffi/bindings.ts";
 
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);

@@ -34,7 +34,7 @@ export async function serveMcp(opts: ServeOptions): Promise<void> {
     }
   }
 
-  const server = new McpServer({ name: "haril", version: "0.1.2" });
+  const server = new McpServer({ name: "haril", version: "0.1.3" });
 
   registerTools(server, sessionHolder);
 

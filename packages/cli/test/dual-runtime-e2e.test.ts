@@ -113,7 +113,7 @@ describe("published CLI dual-runtime compatibility", () => {
         encoding: "utf8",
       });
       expect(version.status).toBe(0);
-      expect(version.stdout).toContain("haril 0.1.2");
+      expect(version.stdout).toContain("haril 0.1.3");
 
       const doctor = spawnSync(runtime.command, [cliPath, "doctor"], {
         cwd: root,
