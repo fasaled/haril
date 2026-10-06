@@ -1,6 +1,5 @@
 import React, { useState, useCallback } from "react";
 import { Box, Text, useInput } from "ink";
-import TextInput from "ink-text-input";
 import type { HarilSession, Phase, CompleteContext } from "../../../../core/src/index.ts";
 import { complete, getVisibleSuggestionsWindow, applyCompletion } from "../../../../core/src/index.ts";
 
@@ -42,7 +41,7 @@ export const Prompt: React.FC<PromptProps> = ({
   activeTask = null,
 }) => {
   const [value, setValue] = useState("");
-  const [inputVersion, setInputVersion] = useState(0);
+  const [cursor, setCursor] = useState(0);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [historyPos, setHistoryPos] = useState(-1);
@@ -79,6 +78,14 @@ export const Prompt: React.FC<PromptProps> = ({
   const endIdx = Math.min(terminalLines.length, startIdx + outputAreaHeight);
   const visibleLines = terminalLines.slice(startIdx, endIdx);
 
+  const refreshSuggestions = useCallback(
+    (v: string) => {
+      setSuggestions(computeSuggestions(v));
+      setSuggestionIndex(0);
+    },
+    [computeSuggestions],
+  );
+
   useInput(
     (input, key) => {
       if (pending) return;
@@ -102,7 +109,7 @@ export const Prompt: React.FC<PromptProps> = ({
         const completed = applyCompletion(value, selected);
 
         setValue(completed);
-        setInputVersion((v) => v + 1);
+        setCursor(completed.length);
         setSuggestions(currentList);
         setSuggestionIndex(nextIndex);
         return;
@@ -114,9 +121,8 @@ export const Prompt: React.FC<PromptProps> = ({
         setHistoryPos(nextPos);
         const historyValue = history[history.length - 1 - nextPos] ?? "";
         setValue(historyValue);
-        setInputVersion((v) => v + 1);
-        const nextSug = computeSuggestions(historyValue);
-        setSuggestions(nextSug);
+        setCursor(historyValue.length);
+        setSuggestions(computeSuggestions(historyValue));
         setSuggestionIndex(0);
         return;
       }
@@ -127,14 +133,13 @@ export const Prompt: React.FC<PromptProps> = ({
           setHistoryPos(nextPos);
           const historyValue = history[history.length - 1 - nextPos] ?? "";
           setValue(historyValue);
-          setInputVersion((v) => v + 1);
-          const nextSug = computeSuggestions(historyValue);
-          setSuggestions(nextSug);
+          setCursor(historyValue.length);
+          setSuggestions(computeSuggestions(historyValue));
           setSuggestionIndex(0);
         } else if (historyPos === 0) {
           setHistoryPos(-1);
           setValue("");
-          setInputVersion((v) => v + 1);
+          setCursor(0);
           setSuggestions([]);
           setSuggestionIndex(0);
         }
@@ -146,11 +151,83 @@ export const Prompt: React.FC<PromptProps> = ({
         setSuggestionIndex(0);
         return;
       }
+
+      // Ctrl/Meta combos are panel shortcuts handled by App (Ctrl+E/D/F,
+      // Ctrl+Q). They must never be typed into the prompt line. The
+      // ink-text-input we used before appended them as plain letters —
+      // pressing Ctrl+E while the prompt was focused printed a stray "e".
+      if (key.ctrl || key.meta) return;
+
+      if (key.return) {
+        const line = value.trim();
+        if (!line) return;
+        setValue("");
+        setCursor(0);
+        setSuggestions([]);
+        setSuggestionIndex(0);
+        setHistoryPos(-1);
+        setPending(true);
+        try {
+          void (async () => {
+            try {
+              await onSubmit(line);
+            } finally {
+              setPending(false);
+            }
+          })();
+        } catch {
+          setPending(false);
+        }
+        return;
+      }
+
+      if (key.leftArrow) {
+        setCursor(Math.max(0, cursor - 1));
+        return;
+      }
+      if (key.rightArrow) {
+        setCursor(Math.min(value.length, cursor + 1));
+        return;
+      }
+      if (key.home) {
+        setCursor(0);
+        return;
+      }
+      if (key.end) {
+        setCursor(value.length);
+        return;
+      }
+
+      if (key.backspace || key.delete) {
+        if (cursor > 0) {
+          const next = value.slice(0, cursor - 1) + value.slice(cursor);
+          setValue(next);
+          setCursor(cursor - 1);
+          refreshSuggestions(next);
+          setHistoryPos(-1);
+        }
+        return;
+      }
+
+      // Printable input: single keystrokes or pasted chunks.
+      if (input && input.length > 0) {
+        const next = value.slice(0, cursor) + input + value.slice(cursor);
+        setValue(next);
+        setCursor(cursor + input.length);
+        refreshSuggestions(next);
+        setHistoryPos(-1);
+      }
     },
     { isActive: isFocused }
   );
 
   const borderColor = isFocused ? "cyan" : "gray";
+
+  // Render the input line with a fake block cursor (inverse video on the
+  // character under the caret, or an inverse space at the end).
+  const before = value.slice(0, cursor);
+  const at = cursor < value.length ? value[cursor]! : " ";
+  const after = cursor < value.length ? value.slice(cursor + 1) : "";
 
   return (
     <Box
@@ -241,33 +318,15 @@ export const Prompt: React.FC<PromptProps> = ({
         <Text color="cyan" bold>
           ❯{" "}
         </Text>
-        <TextInput
-          key={inputVersion}
-          value={value}
-          focus={isFocused}
-          onChange={(v) => {
-            setValue(v);
-            setHistoryPos(-1);
-            const sug = computeSuggestions(v);
-            setSuggestions(sug);
-            setSuggestionIndex(0);
-          }}
-          onSubmit={async (v) => {
-            if (pending) return;
-            const line = v.trim();
-            if (!line) return;
-            setValue("");
-            setSuggestions([]);
-            setSuggestionIndex(0);
-            setHistoryPos(-1);
-            setPending(true);
-            try {
-              await onSubmit(line);
-            } finally {
-              setPending(false);
-            }
-          }}
-        />
+        {isFocused ? (
+          <Text>
+            {before}
+            <Text inverse>{at}</Text>
+            {after}
+          </Text>
+        ) : (
+          <Text>{value.length > 0 ? value : " "}</Text>
+        )}
       </Box>
     </Box>
   );
