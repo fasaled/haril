@@ -162,4 +162,70 @@ describe("Prompt input handling", () => {
     expect(box).toContain("axb");
     inst.unmount();
   });
+
+  test("typing a command prefix shows the suggestions bar", async () => {
+    const { inst, stdout, press } = await makePrompt();
+    await press("o");
+    const box = stdout.lastBox();
+    // In the "empty" phase, "o" completes to the single candidate "open",
+    // rendered selected as [open].
+    expect(box).toContain("[open]");
+    inst.unmount();
+  });
+
+  test("Tab completes the selected candidate into the input", async () => {
+    const { inst, stdout, press } = await makePrompt();
+    await press("o");
+    await press("\t");
+    const box = stdout.lastBox();
+    expect(box).toContain("❯ open");
+    inst.unmount();
+  });
+
+  test("Esc clears the suggestions bar but keeps the typed text", async () => {
+    const { inst, stdout, press } = await makePrompt();
+    await press("o");
+    await press("\u001b");
+    const box = stdout.lastBox();
+    expect(box).toContain("❯ o");
+    expect(box).not.toContain("[open]");
+    inst.unmount();
+  });
+
+  test("backspace restores suggestions from the shortened line", async () => {
+    const { inst, stdout, press } = await makePrompt();
+
+    const waitBox = async (pred: (box: string) => boolean, timeoutMs = 1500): Promise<string> => {
+      const end = Date.now() + timeoutMs;
+      let box = stdout.lastBox();
+      while (Date.now() < end) {
+        box = stdout.lastBox();
+        if (pred(box)) return box;
+        await sleep(30);
+      }
+      return box;
+    };
+
+    await press("o");   // -> [open] suggested
+    await waitBox((b) => b.includes("❯ o") && b.includes("[open]"));
+
+    await press("z");   // "oz" matches nothing -> bar hides
+    const hidden = await waitBox((b) => b.includes("❯ oz"));
+    expect(hidden).not.toContain("[open]");
+
+    await press("\u007f"); // backspace -> "o" again -> [open] returns
+    const restored = await waitBox((b) => b.includes("❯ o") && !b.includes("oz"));
+    expect(restored).toContain("[open]");
+    inst.unmount();
+  });
+
+  test("suggestions bar is hidden when the line matches nothing", async () => {
+    const { inst, stdout, press } = await makePrompt();
+    await press("z");
+    await press("z");
+    const box = stdout.lastBox();
+    expect(box).toContain("❯ z");
+    expect(box).not.toContain("·");
+    inst.unmount();
+  });
 });
