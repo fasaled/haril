@@ -11,6 +11,8 @@ export interface LiveCapturePanelProps {
   /** Lines scrolled up from the tail; 0 follows new events. */
   scrollOffset: number;
   height: number;
+  /** Available width inside the panel (accounting for borders/padding). */
+  width?: number;
 }
 
 const KIND_COLORS: Record<string, string> = {
@@ -44,6 +46,7 @@ export const LiveCapturePanel: React.FC<LiveCapturePanelProps> = ({
   isFocused,
   scrollOffset,
   height,
+  width: propWidth,
 }) => {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -83,6 +86,23 @@ export const LiveCapturePanel: React.FC<LiveCapturePanelProps> = ({
   const end = filtered.length - offset;
   const rows = filtered.slice(Math.max(0, end - visible), end);
 
+  // Fixed columns per row: offset(10) + " "(1) + kind-pad(8) + " "(1) +
+  // source-upper + " "(1) + pid-pad(6) + " "(1) + paddingX(2) = ~30 cols.
+  // Reserve that and split the rest between path and process name.
+  const innerWidth = propWidth ? Math.max(10, propWidth - 2) : 0; // minus paddingX
+  const RESERVED = 10 + 1 + 8 + 1 + 3 + 1 + 6 + 1; // 31
+  const restCols = Math.max(0, innerWidth - RESERVED);
+  // Heuristic: most events have no process name, so when present allocate
+  // a fair share; when absent give all to the path.
+  const splitCols = (proc: string | undefined | null): { pathCols: number; procCols: number } => {
+    if (!proc) return { pathCols: restCols, procCols: 0 };
+    const procCols = Math.min(proc.length + 1, Math.floor(restCols / 2));
+    const pathCols = Math.max(0, restCols - procCols - 2); // "  " separator
+    return { pathCols, procCols };
+  };
+  const clip = (s: string, n: number) =>
+    !n || s.length <= n ? s : s.slice(0, Math.max(0, n - 1)) + "…";
+
   return (
     <Box
       flexDirection="column"
@@ -112,21 +132,26 @@ export const LiveCapturePanel: React.FC<LiveCapturePanelProps> = ({
         </Text>
       </Box>
       {rows.length === 0 ? (
-        <Text dimColor>
+        <Text dimColor wrap="truncate-end">
           {selectedPath ? "No events for this file yet" : "Waiting for file activity under "}
           {selectedPath ? "" : live.root}
         </Text>
       ) : (
-        rows.map((e) => (
-          <Text key={e.seq} wrap="truncate-end">
-            <Text dimColor>{formatOffsetNs(e.offsetNs)} </Text>
-            <Text color={KIND_COLORS[e.kind] ?? "white"}>{e.kind.padEnd(8)}</Text>{" "}
-            <Text color={SOURCE_COLORS[e.source] ?? "white"}>{e.source.toUpperCase()}</Text>{" "}
-            <Text dimColor>{e.pid != null && e.pid > 0 ? String(e.pid).padStart(6) : "     -"} </Text>
-            <Text>{e.path ?? "?"}</Text>
-            {e.process ? <Text dimColor>  {e.process}</Text> : null}
-          </Text>
-        ))
+        rows.map((e) => {
+          const { pathCols, procCols } = splitCols(e.process);
+          return (
+            <Box key={e.seq} width="100%" overflow="hidden">
+              <Text wrap="truncate-end">
+                <Text dimColor>{formatOffsetNs(e.offsetNs)} </Text>
+                <Text color={KIND_COLORS[e.kind] ?? "white"}>{e.kind.padEnd(8)}</Text>{" "}
+                <Text color={SOURCE_COLORS[e.source] ?? "white"}>{e.source.toUpperCase()}</Text>{" "}
+                <Text dimColor>{e.pid != null && e.pid > 0 ? String(e.pid).padStart(6) : "     -"} </Text>
+                <Text>{clip(e.path ?? "?", pathCols)}</Text>
+                {e.process ? <Text dimColor>  {clip(e.process, procCols)}</Text> : null}
+              </Text>
+            </Box>
+          );
+        })
       )}
     </Box>
   );

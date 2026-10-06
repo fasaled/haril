@@ -11,6 +11,7 @@ import { FileBrowser, type FileItem } from "./components/FileBrowser.tsx";
 import { EventList } from "./components/EventList.tsx";
 import { EventDetail } from "./components/EventDetail.tsx";
 import { LiveCapturePanel, filterLiveEvents } from "./components/LiveCapturePanel.tsx";
+import { applyEventFilter, reconcileSelection } from "./filterEvents.ts";
 
 export interface AppProps {
   session: HarilSession;
@@ -297,8 +298,33 @@ export const App: React.FC<AppProps> = ({ session }) => {
     }
   };
 
+  // Single source of truth for the filtered event list. Both `EventList`
+  // (which receives it as a prop) and `handleEventNavigate` (which moves the
+  // selection cursor through it) operate on exactly this array, so the
+  // highlighted row in the list and the detail panel can never disagree on
+  // which event is currently selected.
+  const filteredEvents = useMemo(
+    () => applyEventFilter(events, eventFilter),
+    [events, eventFilter],
+  );
+
+  // Keep `selectedEvent` in lock-step with `selectedEventIndex`. Whenever the
+  // filtered list changes (new file loaded, filter applied, events trimmed)
+  // we clamp the index to a valid value and update `selectedEvent` so the
+  // detail panel never shows a stale row that is no longer highlighted, and
+  // never stays empty when the list has rows.
+  useEffect(() => {
+    const next = reconcileSelection(filteredEvents, selectedEventIndex);
+    if (next.index !== selectedEventIndex) setSelectedEventIndex(next.index);
+    setSelectedEvent(next.event);
+    // We intentionally don't depend on `selectedEventIndex` here: this effect
+    // exists precisely to reconcile the index against the list. Including it
+    // would cause an infinite update loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredEvents]);
+
   const handleEventNavigate = (direction: "up" | "down" | "first" | "last" | "pageUp" | "pageDown") => {
-    const filtered = getFilteredEvents();
+    const filtered = filteredEvents;
     if (filtered.length === 0) return;
 
     let newIndex = selectedEventIndex;
@@ -323,31 +349,10 @@ export const App: React.FC<AppProps> = ({ session }) => {
         break;
     }
     setSelectedEventIndex(newIndex);
-    setSelectedEvent(filtered[newIndex] || null);
+    setSelectedEvent(filtered[newIndex] ?? null);
   };
 
   const getFilteredFiles = () => files;
-
-  const getFilteredEvents = () => {
-    let result = events;
-    if (eventFilter.kinds?.length) {
-      result = result.filter((e) => eventFilter.kinds!.includes(e.eventKind));
-    }
-    if (eventFilter.failedOnly) {
-      result = result.filter((e) => e.ntStatus !== null && e.ntStatus !== 0);
-    }
-    if (eventFilter.pid != null) {
-      result = result.filter((e) => e.pid === eventFilter.pid);
-    }
-    if (eventFilter.process) {
-      const lower = eventFilter.process.toLowerCase();
-      result = result.filter((e) => e.processImageName?.toLowerCase().includes(lower));
-    }
-    if (eventFilter.reset) {
-      return events;
-    }
-    return result;
-  };
 
   const loadFiles = async (reset = false) => {
     setFileLoading(true);
@@ -377,8 +382,8 @@ export const App: React.FC<AppProps> = ({ session }) => {
   };
 
   const loadEventsForKey = async (target: string) => {
-    setSelectedEvent(null);
     setSelectedEventIndex(0);
+    setSelectedEvent(null);
     setEventsLoading(true);
     try {
       const result = await session.runCommand(parseCommand(`events ${target} --limit 1000`));
@@ -524,7 +529,13 @@ export const App: React.FC<AppProps> = ({ session }) => {
 
   // Terminal Prompt panel height: comfortable terminal window (8 to 11 lines)
   const promptHeight = Math.max(8, Math.min(11, Math.floor(termRows * 0.35)));
-  const mainContentLines = Math.max(5, termRows - 5 - promptHeight);
+  // Rows actually available for the main content area. Fixed siblings above
+  // it consume: Header 2 rows (title + rule) + FileBrowser 4 rows (round
+  // border around 2 lines) + StatusBar 1 row = 7. Passing a larger number
+  // inflates the panels' notion of their viewport and clips event rows
+  // past the bottom of the painted area.
+  const chromeRows = 7;
+  const mainContentLines = Math.max(5, termRows - chromeRows - promptHeight);
 
   // Phase-specific render functions
   function renderEmptyPhase() {
@@ -591,6 +602,7 @@ export const App: React.FC<AppProps> = ({ session }) => {
             isFocused={focusedPanel === "events"}
             scrollOffset={liveScroll}
             height={Math.max(4, mainContentLines - 1)}
+            width={Math.max(0, termCols - 4)}
           />
         </Box>
 
@@ -642,13 +654,13 @@ export const App: React.FC<AppProps> = ({ session }) => {
           <Box width="60%" height="100%">
             {selectedFileKeyHash ? (
               <EventList
-                events={events}
+                events={filteredEvents}
                 baseNs={snap.packageManifest?.startedAt}
                 fileKey={null}
                 selectedIndex={selectedEventIndex}
                 onSelect={(idx) => {
                   setSelectedEventIndex(idx);
-                  setSelectedEvent(getFilteredEvents()[idx] || null);
+                  setSelectedEvent(filteredEvents[idx] ?? null);
                 }}
                 onNavigate={handleEventNavigate}
                 onFilter={(f) => setEventFilter(f)}
@@ -656,6 +668,7 @@ export const App: React.FC<AppProps> = ({ session }) => {
                 filter={eventFilter}
                 loading={eventsLoading}
                 visibleHeight={mainContentLines}
+                width={Math.max(0, Math.floor(termCols * 0.6) - 4)}
               />
             ) : (
               <Box
@@ -678,6 +691,7 @@ export const App: React.FC<AppProps> = ({ session }) => {
               baseNs={snap.packageManifest?.startedAt}
               fileKey={null}
               isFocused={focusedPanel === "detail"}
+              width={Math.max(0, Math.floor(termCols * 0.4) - 4)}
               onClose={() => {
                 setSelectedEvent(null);
                 setSelectedEventIndex(0);
