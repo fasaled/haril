@@ -692,6 +692,7 @@ export const App: React.FC<AppProps> = ({ session }) => {
               fileKey={null}
               isFocused={focusedPanel === "detail"}
               width={Math.max(0, Math.floor(termCols * 0.4) - 4)}
+              height={mainContentLines}
               onClose={() => {
                 setSelectedEvent(null);
                 setSelectedEventIndex(0);

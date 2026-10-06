@@ -39,6 +39,8 @@ function stripAnsi(s: string): string {
 const fakeStdin = new PassThrough();
 (fakeStdin as unknown as { isTTY: boolean }).isTTY = true;
 (fakeStdin as unknown as { setRawMode: () => void }).setRawMode = () => {};
+(fakeStdin as unknown as { ref: () => unknown }).ref = () => fakeStdin;
+(fakeStdin as unknown as { unref: () => unknown }).unref = () => fakeStdin;
 
 const longPath =
   "C:\\Users\\Francisco\\test_folder\\documents\\haril-20261005-224722.haril";
@@ -113,7 +115,7 @@ describe("EventDetail narrow-panel rendering", () => {
     // The full path must NOT appear as one contiguous string — that means it
     // overflowed the panel. Instead, a clipped version with an ellipsis is OK.
     expect(out).not.toContain(longPath);
-    expect(out).toMatch(/Observed:\s+C:\\Users\\Fran…/);
+    expect(out).toMatch(/Observed:\s+C:\\Users\\Fr…/);
     // The "Path" section header must be visible (regression of the bug where
     // titles were clipped to empty strings and the section disappeared).
     expect(out).toContain("Path");
@@ -140,7 +142,9 @@ describe("EventDetail narrow-panel rendering", () => {
     expect(out).toMatch(/Kind:\s+Open/);
     expect(out).toMatch(/Source:\s+ETW/);
     // Long values are clipped with an ellipsis at the value-column boundary.
-    expect(out).toMatch(/Process:\s+SearchProtoco…/);
+    expect(out).toMatch(/Process:\s+SearchProto…/);
+    // "Source Index:" (13 cols) fits the 14-col label column un-clipped.
+    expect(out).toContain("Source Index:");
   });
 });
 
